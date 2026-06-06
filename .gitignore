@@ -1,0 +1,14 @@
+# Build output
+/obj/
+/build/
+*.o
+*.exe
+
+# User runtime config (created next to the exe at runtime)
+windows_service_monitor.cfg
+windows_service_monitor.cfg.tmp
+
+# Editor / OS noise
+*.swp
+.vs/
+Thumbs.db
