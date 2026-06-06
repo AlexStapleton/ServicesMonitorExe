@@ -6,8 +6,23 @@
 // Configuration parsing
 // ============================================================
 
+// Config file format version. Bump when the on-disk format changes in a way
+// that needs migration. Written as the first line of the save header and read
+// back here so the loader can detect files from a newer build.
+static constexpr int kConfigVersion = 1;
+
 bool parse_setting(App& self, const wchar_t* key, const wchar_t* val) {
     if (!key || !val) return false;
+
+    if (_wcsicmp(key, L"config_version") == 0) {
+        int v = _wtoi(val);
+        if (v > kConfigVersion) {
+            self.deferred_logs.push_back(
+                L"Config was written by a newer version of the app; "
+                L"unrecognized settings will be ignored.");
+        }
+        return true; // accepted (no runtime field needed yet)
+    }
 
     // NOTE: Settings are stored in milliseconds (ms).
     // For backward compatibility, we still accept legacy *_s keys (seconds) and convert to ms.
@@ -463,9 +478,19 @@ void load_config(App& self) {
     }
     bytes[nread] = 0;
 
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), -1, NULL, 0);
+    // Skip a UTF-8 BOM (EF BB BF) if one is present. The app never writes a BOM,
+    // but an editor (Notepad, some VS Code configs) may add one — without this the
+    // bytes attach to the first token and the first SETTING line silently fails.
+    const char* mb = bytes.data();
+    if (nread >= 3 && (unsigned char)mb[0] == 0xEF
+                   && (unsigned char)mb[1] == 0xBB
+                   && (unsigned char)mb[2] == 0xBF) {
+        mb += 3;
+    }
+
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, mb, -1, NULL, 0);
     std::wstring wtxt_str((size_t)wlen, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), -1, wtxt_str.data(), wlen);
+    MultiByteToWideChar(CP_UTF8, 0, mb, -1, wtxt_str.data(), wlen);
     bytes.clear();  // free UTF-8 buffer early
     wchar_t* wtxt = wtxt_str.data();  // wcstok_s operates in-place on this buffer
 
@@ -890,6 +915,7 @@ void save_config_now(App& self) {
     }
 
 int n = snprintf(header, sizeof(header),
+        "SETTING|config_version|%d\n"
         "SETTING|ui_refresh_ms|%d\n"
         "SETTING|monitor_interval_ms|%d\n"
         "SETTING|autostop_cooldown_ms|%d\n"
@@ -916,6 +942,7 @@ int n = snprintf(header, sizeof(header),
         "#   SVC|...\n"
         "#   EXE|...\n"
         "#   ENDPROFILE\n",
+        kConfigVersion,
         def.ui_refresh_ms, def.monitor_interval_ms, def.autostop_cooldown_ms, def.stop_wait_ms,
         def.tray_enabled ? 1 : 0, def.close_to_tray ? 1 : 0,
         dark,
@@ -947,69 +974,80 @@ int n = snprintf(header, sizeof(header),
         if (fwrite(utf8_buf.data(), 1, to_write, f) != to_write) write_ok = false;
     };
 
+    // Truncation-proof formatted line writer. Fast path uses a stack buffer for
+    // the common case; if a long name/path would overflow it we grow on the heap
+    // so config rows are never silently truncated (which would lose data on save).
+    auto write_wfmt = [&](const wchar_t* fmt, auto... args) {
+        wchar_t stackbuf[700];
+        if (StringCchPrintfW(stackbuf, ARRAYSIZE(stackbuf), fmt, args...) == S_OK) {
+            write_wline(stackbuf);
+            return;
+        }
+        for (size_t cap = ARRAYSIZE(stackbuf) * 2; cap <= (1u << 20); cap *= 2) {
+            std::wstring buf(cap, L'\0');
+            if (StringCchPrintfW(buf.data(), cap, fmt, args...) == S_OK) {
+                buf.resize(wcslen(buf.c_str()));
+                write_wline(buf.c_str());
+                return;
+            }
+        }
+        // Pathologically long (>1M wchars): drop the row rather than truncate.
+        write_ok = false;
+    };
+
     // Default items
     for (const auto& r : def.items[KIND_SVC]) {
         if (r.name.empty()) continue;
-        wchar_t wline[700];
-        StringCchPrintfW(wline, 700, L"SVC|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
-        write_wline(wline);
+        write_wfmt(L"SVC|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
     }
     for (const auto& r : def.items[KIND_EXE]) {
         if (r.name.empty()) continue;
-        wchar_t wline[700];
         if (!r.exe_path.empty()) {
-            StringCchPrintfW(wline, 700, L"EXE|%s|%d|%s\n", r.name.c_str(), r.auto_stop ? 1 : 0, r.exe_path.c_str());
+            write_wfmt(L"EXE|%s|%d|%s\n", r.name.c_str(), r.auto_stop ? 1 : 0, r.exe_path.c_str());
         } else {
-            StringCchPrintfW(wline, 700, L"EXE|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
+            write_wfmt(L"EXE|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
         }
-        write_wline(wline);
     }
 
     // Profiles
     for (const auto& p : profs) {
         if (p.name.empty()) continue;
 
-        wchar_t wline[700];
-        StringCchPrintfW(wline, 700, L"\nPROFILE|%s\n", p.name.c_str());
-        write_wline(wline);
+        write_wfmt(L"\nPROFILE|%s\n", p.name.c_str());
 
         for (const auto& w : p.watch_exes) {
             if (w.empty()) continue;
-            StringCchPrintfW(wline, 700, L"WATCH|%s\n", w.c_str());
-            write_wline(wline);
+            write_wfmt(L"WATCH|%s\n", w.c_str());
         }
 
         // Items/targets to start on profile activation (shell-open; any file type)
         for (const auto& r : p.start_items) {
             if (r.target.empty()) continue;
-            StringCchPrintfW(wline, 700, L"STARTITEM|%s\n", r.target.c_str());
-            write_wline(wline);
+            write_wfmt(L"STARTITEM|%s\n", r.target.c_str());
         }
 
 
 
         // Emit profile settings explicitly (simple + predictable). Since profile cfg inherits defaults on load,
         // saving them makes the profile self-contained and resilient to future default changes.
-        StringCchPrintfW(wline, 700, L"SETTING|ui_refresh_ms|%d\n", p.cfg.ui_refresh_ms); write_wline(wline);
-        StringCchPrintfW(wline, 700, L"SETTING|monitor_interval_ms|%d\n", p.cfg.monitor_interval_ms); write_wline(wline);
-        StringCchPrintfW(wline, 700, L"SETTING|autostop_cooldown_ms|%d\n", p.cfg.autostop_cooldown_ms); write_wline(wline);
-        StringCchPrintfW(wline, 700, L"SETTING|stop_wait_ms|%d\n", p.cfg.stop_wait_ms); write_wline(wline);
-        StringCchPrintfW(wline, 700, L"SETTING|tray_enabled|%d\n", p.cfg.tray_enabled ? 1 : 0); write_wline(wline);
-        StringCchPrintfW(wline, 700, L"SETTING|close_to_tray|%d\n", p.cfg.close_to_tray ? 1 : 0); write_wline(wline);
+        write_wfmt(L"SETTING|ui_refresh_ms|%d\n", p.cfg.ui_refresh_ms);
+        write_wfmt(L"SETTING|monitor_interval_ms|%d\n", p.cfg.monitor_interval_ms);
+        write_wfmt(L"SETTING|autostop_cooldown_ms|%d\n", p.cfg.autostop_cooldown_ms);
+        write_wfmt(L"SETTING|stop_wait_ms|%d\n", p.cfg.stop_wait_ms);
+        write_wfmt(L"SETTING|tray_enabled|%d\n", p.cfg.tray_enabled ? 1 : 0);
+        write_wfmt(L"SETTING|close_to_tray|%d\n", p.cfg.close_to_tray ? 1 : 0);
 
         for (const auto& r : p.cfg.items[KIND_SVC]) {
             if (r.name.empty()) continue;
-            StringCchPrintfW(wline, 700, L"SVC|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
-            write_wline(wline);
+            write_wfmt(L"SVC|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
         }
         for (const auto& r : p.cfg.items[KIND_EXE]) {
             if (r.name.empty()) continue;
             if (!r.exe_path.empty()) {
-                StringCchPrintfW(wline, 700, L"EXE|%s|%d|%s\n", r.name.c_str(), r.auto_stop ? 1 : 0, r.exe_path.c_str());
+                write_wfmt(L"EXE|%s|%d|%s\n", r.name.c_str(), r.auto_stop ? 1 : 0, r.exe_path.c_str());
             } else {
-                StringCchPrintfW(wline, 700, L"EXE|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
+                write_wfmt(L"EXE|%s|%d\n", r.name.c_str(), r.auto_stop ? 1 : 0);
             }
-            write_wline(wline);
         }
 
         write_wline(L"ENDPROFILE\n");
