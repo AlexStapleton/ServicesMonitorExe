@@ -710,7 +710,7 @@ bool binsearch_nameidx(const NameIdx* arr, size_t n, const wchar_t* key, size_t*
 // main.cpp / messaging
 void post_log(App& self, const wchar_t* text);
 void log_linef(App& self, const wchar_t* fmt, ...);
-void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>& names, const std::vector<StatusStr>& statuses, size_t n, time_t wall_ts);
+void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>& names, const std::vector<uint32_t>& uids, const std::vector<StatusStr>& statuses, size_t n, time_t wall_ts);
 void request_save_debounced(App& self);
 void post_model_dirty(App& self);
 

@@ -153,6 +153,12 @@ struct MonSnap {
     std::vector<uint64_t> svc_lastreq;
     std::vector<uint64_t> exe_lastreq;
 
+    // Stable per-item uids captured at snapshot time. Let the status-apply path
+    // resolve Item* by integer uid_map lookup instead of re-hashing the name
+    // (FNV-1a + case-insensitive compare) for every item on every tick.
+    std::vector<uint32_t> svc_uids;
+    std::vector<uint32_t> exe_uids;
+
     std::vector<NameIdx> svc_idx_sorted;
     std::vector<NameIdx> exe_idx_sorted;
 
@@ -236,6 +242,8 @@ static void mons_ensure_sizes(MonSnap& snap, MonScratch& sc, size_t ns, size_t n
     snap.exe_auto.resize(ne, 0);
     snap.svc_lastreq.resize(ns, 0);
     snap.exe_lastreq.resize(ne, 0);
+    snap.svc_uids.resize(ns, 0);
+    snap.exe_uids.resize(ne, 0);
     sc.svc_status.resize(ns);
     sc.exe_status.resize(ne);
     sc.exe_counts.resize(ne, 0);
@@ -337,11 +345,13 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
                 Item* it = self.items[KIND_SVC].v[i].get();
                 snap.svc_auto[i] = it ? (it->auto_stop ? 1 : 0) : 0;
                 snap.svc_lastreq[i] = it ? it->last_autostop_mono_ms : 0;
+                snap.svc_uids[i] = it ? it->uid : 0;
             }
             for (size_t i = 0; i < ne; i++) {
                 Item* it = self.items[KIND_EXE].v[i].get();
                 snap.exe_auto[i] = it ? (it->auto_stop ? 1 : 0) : 0;
                 snap.exe_lastreq[i] = it ? it->last_autostop_mono_ms : 0;
+                snap.exe_uids[i] = it ? it->uid : 0;
             }
         }
 
@@ -480,7 +490,7 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
             }
 
             // Option A: one message per kind per tick
-            post_status_bulk(self, ItemKind::Svc, snap.svc_names, sc.svc_status, ns, wall_now);
+            post_status_bulk(self, ItemKind::Svc, snap.svc_names, snap.svc_uids, sc.svc_status, ns, wall_now);
         }
 
         // --- EXEs: derive running/stopped from counts already populated by the unified snapshot ---
@@ -555,7 +565,7 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
                 }
             }
 
-            post_status_bulk(self, ItemKind::Exe, snap.exe_names, sc.exe_status, ne, wall_now);
+            post_status_bulk(self, ItemKind::Exe, snap.exe_names, snap.exe_uids, sc.exe_status, ne, wall_now);
         }
 
         DWORD wait_ms = (DWORD)std::max(50, monitor_interval_ms);

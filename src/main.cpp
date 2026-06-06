@@ -16,7 +16,7 @@ void post_log(App& self, const wchar_t* text) {
 // Bulk status update (generation-only, no heap churn):
 // - Monitor thread updates Item::last_status/last_update_wall under lock.
 // - UI thread repaints only rows that changed (via WM_APP_STATUS_GEN / UI timer).
-void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>& names, const std::vector<StatusStr>& statuses, size_t n, time_t wall_ts) {
+void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>& names, const std::vector<uint32_t>& uids, const std::vector<StatusStr>& statuses, size_t n, time_t wall_ts) {
     if (n == 0) return;
     const int k = ki(kind);
 
@@ -31,7 +31,11 @@ void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>&
 
         for (size_t i = 0; i < n; i++) {
             if (i >= names.size() || names[i].empty()) continue;
-            Item* it = list_find(&self.items[k], names[i].c_str());
+            // Resolve by stable uid (O(1) integer lookup) rather than re-hashing
+            // the name every tick. uids are never reused, so a removed item just
+            // misses here — same safety as the old name-based find.
+            uint32_t uid = (i < uids.size()) ? uids[i] : 0;
+            Item* it = uid ? uid_to_item_ptr_unlocked(self, uid) : nullptr;
             if (!it) continue;
 
             const wchar_t* ns = statuses[i].buf[0] ? statuses[i].buf : L"unknown";
