@@ -12,3 +12,7 @@ windows_service_monitor.cfg.tmp
 *.swp
 .vs/
 Thumbs.db
+
+# Syncthing sync metadata
+.stfolder/
+.stversions/
