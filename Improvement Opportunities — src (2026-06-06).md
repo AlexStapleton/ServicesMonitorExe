@@ -23,12 +23,12 @@ Decided, no code change:
 
 - [x] **3.1** — elevation model: **keep forced elevation at startup** (author's decision, 2026-06-06). The whole-app admin requirement stands; EXE-only users continue to see UAC. Documented here so it isn't re-raised.
 
-In progress / planned this round:
+Refactors (this round):
 
-- [ ] **4.3** — split the large `AppWndProc` switch into per-message handlers (behavior-preserving).
-- [ ] **4.2** — group loose `App` UI/window members into sub-structs (pure rename; compiler verifies every site).
-- [ ] **4.4** — de-duplicate the near-identical svc/exe auto-stop enforcement blocks in `monitor.cpp` into one `ItemKind`-parameterized helper. *(Bounded scope: a full `KIND_SVC`/`KIND_EXE` → enum sweep across the codebase is intentionally not pursued — too much churn/regression risk for a LOW item.)*
-- [ ] **1.2** — reduce per-tick `auto`/`lastreq` copy under the model lock (LOW; only matters at large item counts).
+- [x] **4.3** — extracted the 8 largest self-contained `AppWndProc` cases (`WM_COMMAND`, `WM_CONTEXTMENU`, `WM_CREATE`, `WM_SETTINGCHANGE`, `WM_APP_INITIAL_LAYOUT`, `WM_NOTIFY`, `WM_DPICHANGED`, `WM_GETMINMAXINFO`) into named `on_wm_*` handlers. Each body verified byte-identical to the original before commit. Fall-through cases (`WM_DRAWITEM`/`WM_MEASUREITEM`/`WM_APP_TRAYICON`) left inline.
+- [x] **4.2** — grouped the splitter/hsplit drag, initial-layout, and `in_size_move` fields into a cohesive `LayoutState` sub-struct (`App::layout_state`). *Bounded scope: a full regroup of all ~80 loose `App` members was deliberately not done — disproportionate churn/regression risk on untested code for a cosmetic gain.*
+- [x] **4.4** — unified the near-identical svc/exe auto-stop enforcement tails into one `enforce_autostop_kind(kind, …, honor_suppress)` helper. *(A full `KIND_SVC`/`KIND_EXE` → enum sweep was intentionally not pursued.)*
+- [x] **1.2** — **assessed, not implemented (by design).** The per-tick copy is a handful of scalars per item under a lock that is *already* held for the names-changed check; it's microseconds even at thousands of items. Eliminating it would require either holding the model lock across the slow SCM/process queries **and** the enqueue (violating the documented lock-order rule — `action_enqueue` must run unlocked) or a dirty-flag/generation scheme whose bookkeeping exceeds the trivial copy cost. The current single-lock snapshot is the correct design; adding machinery here would be net-negative.
 
 Not pursued:
 
