@@ -19,14 +19,20 @@ Implemented this round (each its own git commit; build verified clean via `make`
 - [x] **2.3** — config row writes are now truncation-proof via `write_wfmt` (the data-loss path). *Log-message truncation (cosmetic) deliberately left.*
 - [x] **1.1** — `post_status_bulk` resolves items by stable `uid` (O(1)) instead of per-tick name rehash.
 
-Open / not started:
+Decided, no code change:
 
-- [ ] **3.1** — elevation model (MEDIUM) — **needs a product decision** (see item).
-- [ ] **4.2** — group loose `App` UI/window members into sub-structs (MEDIUM, no functional change; large churn, no tests).
-- [ ] **4.3** — split the large `AppWndProc` switch (MEDIUM, behavior-preserving; regression risk without runtime tests).
-- [ ] **4.4** — standardize on `ItemKind` over the dual `int`/enum representation (LOW).
-- [ ] **1.2** — avoid per-tick `auto`/`lastreq` copy under the model lock (LOW; only matters at large item counts).
-- [ ] **2.2b** — config integrity beyond the version line (optional checksum) — not pursued.
+- [x] **3.1** — elevation model: **keep forced elevation at startup** (author's decision, 2026-06-06). The whole-app admin requirement stands; EXE-only users continue to see UAC. Documented here so it isn't re-raised.
+
+In progress / planned this round:
+
+- [ ] **4.3** — split the large `AppWndProc` switch into per-message handlers (behavior-preserving).
+- [ ] **4.2** — group loose `App` UI/window members into sub-structs (pure rename; compiler verifies every site).
+- [ ] **4.4** — de-duplicate the near-identical svc/exe auto-stop enforcement blocks in `monitor.cpp` into one `ItemKind`-parameterized helper. *(Bounded scope: a full `KIND_SVC`/`KIND_EXE` → enum sweep across the codebase is intentionally not pursued — too much churn/regression risk for a LOW item.)*
+- [ ] **1.2** — reduce per-tick `auto`/`lastreq` copy under the model lock (LOW; only matters at large item counts).
+
+Not pursued:
+
+- [ ] **2.2b** — config integrity beyond the version line (optional checksum).
 
 ---
 

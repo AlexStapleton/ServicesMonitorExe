@@ -576,6 +576,14 @@ static void ui_refresh_if_needed(App& self, HWND hwnd) {
 // Main window proc (GWLP_USERDATA binding)
 // ============================================================
 static LRESULT AppWndProc(App& self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_notify([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_contextmenu([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_getminmaxinfo([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_dpichanged([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_settingchange([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_app_initial_layout([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
+static LRESULT on_wm_command([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
 
 static void schedule_initial_layout(App& self, HWND hwnd) {
     if (self.did_initial_layout) return;
@@ -602,16 +610,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return AppWndProc(self, hwnd, msg, wParam, lParam);
 }
 
-static LRESULT AppWndProc(App& self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-
-if (self.tray.taskbar_restart_msg && msg == self.tray.taskbar_restart_msg) {
-    self.tray.added = false;
-    tray_sync(self, GetModuleHandleW(NULL));
-    return 0;
-}
-
-switch (msg) {
-    case WM_CREATE: {
+static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
         self.hwnd = hwnd;
 
         self.dpi = get_dpi_for_hwnd(hwnd);
@@ -670,73 +669,173 @@ switch (msg) {
 
         update_statusbar(self);
         return 0;
-    }
+}
 
-    case WM_SHOWWINDOW:
-        if (wParam && !self.did_initial_layout) {
-            schedule_initial_layout(self, hwnd);
-        }
-        return 0;
+static LRESULT on_wm_notify([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
+        NMHDR* nh = (NMHDR*)lParam;
 
-    case WM_WINDOWPOSCHANGED: {
-        if (!self.did_initial_layout) {
-            const WINDOWPOS* wp = reinterpret_cast<const WINDOWPOS*>(lParam);
-            if (wp && !(wp->flags & SWP_NOSIZE)) {
-                schedule_initial_layout(self, hwnd);
+        if (nh && (nh->code == HDN_ENDTRACKW || nh->code == HDN_ENDDRAG)) {
+            if (self.lv_svc && nh->hwndFrom == ListView_GetHeader(self.lv_svc)) {
+                capture_columns_now(self, ItemKind::Svc);
+                return 0;
+            }
+            if (self.lv_exe && nh->hwndFrom == ListView_GetHeader(self.lv_exe)) {
+                capture_columns_now(self, ItemKind::Exe);
+                return 0;
             }
         }
+        if (nh && nh->code == NM_RCLICK) {
+            HWND hdr_s = self.lv_svc ? ListView_GetHeader(self.lv_svc) : NULL;
+            HWND hdr_e = self.lv_exe ? ListView_GetHeader(self.lv_exe) : NULL;
+            int kind = -1;
+            if (hdr_s && nh->hwndFrom == hdr_s) kind = KIND_SVC;
+            if (hdr_e && nh->hwndFrom == hdr_e) kind = KIND_EXE;
+            if (kind != -1) {
+                POINT pt; GetCursorPos(&pt);
+                HMENU menu = CreatePopupMenu();
+                AppendMenuW(menu, MF_STRING, IDM_RESET_COLUMNS, L"Reset columns");
+                SetForegroundWindow(hwnd);
+                TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
+                DestroyMenu(menu);
+                PostMessageW(hwnd, WM_NULL, 0, 0);
+                return 0;
+            }
+        }
+        {
+            LRESULT handled = 0;
+            if (handle_main_listview_notify(self, hwnd, nh, lParam, handled)) return handled;
+        }
+
+        // Dark-mode custom draw
+        if (nh && nh->code == NM_CUSTOMDRAW) {
+            bool handled = false;
+            LRESULT lr = theme_handle_customdraw(self, nh, lParam, handled);
+            if (handled) return lr;
+        }
+
         return 0;
-    }
+}
 
-    case WM_APP_INITIAL_LAYOUT: {
-        self.initial_layout_scheduled = false;
+static LRESULT on_wm_contextmenu([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
+        HWND target = (HWND)wParam;
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (self.did_initial_layout) return 0;
+        if (target == self.lv_svc || target == self.lv_exe) {
+            ItemKind kind = (target == self.lv_svc) ? ItemKind::Svc : ItemKind::Exe;
+            HWND lv = (kind == ItemKind::Svc) ? self.lv_svc : self.lv_exe;
 
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        int cw = rc.right - rc.left;
-        int ch = rc.bottom - rc.top;
-        if (cw <= 1 || ch <= 1) {
-            if (self.initial_layout_tries++ < 25) {
-                schedule_initial_layout(self, hwnd);
+            if (pt.x == -1 && pt.y == -1) {
+                int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
+                if (sel < 0) sel = ListView_GetSelectionMark(lv);
+                RECT ir{};
+                if (sel >= 0 && ListView_GetItemRect(lv, sel, &ir, LVIR_BOUNDS)) {
+                    pt.x = ir.left + 20;
+                    pt.y = ir.top + 20;
+                    ClientToScreen(lv, &pt);
+                } else {
+                    GetCursorPos(&pt);
+                }
+            } else {
+                POINT cpt = pt;
+                ScreenToClient(lv, &cpt);
+                LVHITTESTINFO ht{};
+                ht.pt = cpt;
+                int hit = ListView_HitTest(lv, &ht);
+                if (hit >= 0) {
+                    ListView_SetItemState(lv, hit, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    ListView_EnsureVisible(lv, hit, FALSE);
+                }
+            }
+
+            HMENU m = CreatePopupMenu();
+            if (!m) return 0;
+
+            AppendMenuW(m, MF_STRING, IDM_CTX_STOP, L"Stop");
+            AppendMenuW(m, MF_STRING, IDM_CTX_REMOVE, L"Remove");
+            AppendMenuW(m, MF_STRING, IDM_CTX_TOGGLE_AUTO, L"Toggle auto-stop");
+            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(m, MF_STRING, IDM_CTX_COPY_NAME, L"Copy name");
+            if (kind == ItemKind::Exe) AppendMenuW(m, MF_STRING, IDM_CTX_OPEN_LOC, L"Open file location");
+
+            SetForegroundWindow(hwnd);
+            UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(m);
+
+            switch (cmd) {
+            case IDM_CTX_STOP:        stop_selected(self, kind); break;
+            case IDM_CTX_REMOVE:      remove_selected(self, kind); break;
+            case IDM_CTX_TOGGLE_AUTO: toggle_autostop_selected(self, kind); break;
+            case IDM_CTX_COPY_NAME: {
+                Item* it = lv_get_selected_item_ptr(self, kind);
+                if (it) clipboard_set_text(hwnd, it->name.c_str());
+            } break;
+            case IDM_CTX_OPEN_LOC: {
+                Item* it = lv_get_selected_item_ptr(self, kind);
+                if (it) open_file_location_best_effort(self, it->name.c_str());
+            } break;
+            default: break;
             }
             return 0;
         }
 
-        UINT dpi_now = get_dpi_for_hwnd(hwnd);
-        if (dpi_now == 0) dpi_now = 96;
-        if (self.dpi == 0) self.dpi = dpi_now;
+        // Activity log context menu
+        if (target == self.activity) {
+            if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt);
 
-        if (dpi_now != self.dpi) {
-            UINT oldDpi = self.dpi;
-            UINT newDpi = dpi_now;
-            self.dpi = newDpi;
+            int sel = (int)SendMessageW(self.activity, LB_GETCURSEL, 0, 0);
 
-            if (self.detail_panel_w > 0 && oldDpi && newDpi && oldDpi != newDpi) {
-                self.detail_panel_w = MulDiv(self.detail_panel_w, (int)newDpi, (int)oldDpi);
+            HMENU m = CreatePopupMenu();
+            if (!m) return 0;
+
+            AppendMenuW(m, MF_STRING | (sel >= 0 ? 0 : MF_GRAYED), IDM_LOG_COPY_LINE, L"Copy line");
+            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            int count = (int)SendMessageW(self.activity, LB_GETCOUNT, 0, 0);
+            AppendMenuW(m, MF_STRING | (count > 0 ? 0 : MF_GRAYED), IDM_LOG_CLEAR_ALL, L"Clear all");
+
+            SetForegroundWindow(hwnd);
+            UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(m);
+
+            if (cmd == IDM_LOG_COPY_LINE && sel >= 0) {
+                int len = (int)SendMessageW(self.activity, LB_GETTEXTLEN, (WPARAM)sel, 0);
+                if (len > 0) {
+                    std::wstring txt((size_t)len + 1, L'\0');
+                    SendMessageW(self.activity, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
+                    txt.resize((size_t)len);
+                    clipboard_set_text(hwnd, txt.c_str());
+                }
+            } else if (cmd == IDM_LOG_CLEAR_ALL) {
+                SendMessageW(self.activity, LB_RESETCONTENT, 0, 0);
             }
-
-            theme_compute(self);
-            theme_apply_all_controls(self);
-
-            lv_scale_columns(self.lv_svc, oldDpi, newDpi);
-            lv_scale_columns(self.lv_exe, oldDpi, newDpi);
-            self.lv_needs_layout[KIND_SVC] = true;
-            self.lv_needs_layout[KIND_EXE] = true;
-
-            listbox_adjust_item_height(self.activity, newDpi);
+            return 0;
         }
 
-        layout(self, hwnd);
-        InvalidateRect(hwnd, NULL, TRUE);
-        UpdateWindow(hwnd);
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
 
-        self.did_initial_layout = true;
+static LRESULT on_wm_getminmaxinfo([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        if (mmi) {
+            UINT dpi = self.dpi ? self.dpi : 96;
+            // Minimum window size so all toolbar/action strip controls fit.
+            // 700 accommodates EXE tab: edit+Add+Browse+Stop+Start+Remove+gaps+pad.
+            int minCW = dpi_scale(dpi, 700);
+            int minCH = dpi_scale(dpi, 340);
+            RECT rcw{}, rcc{};
+            if (self.hwnd && GetWindowRect(self.hwnd, &rcw) && GetClientRect(self.hwnd, &rcc)) {
+                int ncW = (rcw.right - rcw.left) - (rcc.right - rcc.left);
+                int ncH = (rcw.bottom - rcw.top) - (rcc.bottom - rcc.top);
+                mmi->ptMinTrackSize.x = minCW + ncW;
+                mmi->ptMinTrackSize.y = minCH + ncH;
+            } else {
+                mmi->ptMinTrackSize.x = minCW;
+                mmi->ptMinTrackSize.y = minCH;
+            }
+        }
         return 0;
-    }
+}
 
-    case WM_DPICHANGED: {
+static LRESULT on_wm_dpichanged([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
         UINT oldDpi = self.dpi ? self.dpi : 96;
         UINT newDpi = HIWORD(wParam);
         if (newDpi == 0) newDpi = get_dpi_for_hwnd(hwnd);
@@ -765,9 +864,9 @@ switch (msg) {
 
         layout(self, hwnd);
         return 0;
-    }
+}
 
-    case WM_SETTINGCHANGE: {
+static LRESULT on_wm_settingchange([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
         // High-contrast toggle: when active, force the system palette so
         // accessibility themes are respected instead of our dark/light colors.
         if (wParam == SPI_SETHIGHCONTRAST ||
@@ -818,178 +917,57 @@ switch (msg) {
             }
         }
         return 0;
-    }
+}
 
-    case WM_ENTERSIZEMOVE:
-        self.in_size_move = true;
-        SetTimer(hwnd, TIMER_LIVE_RESIZE, 16, NULL);
-        return 0;
+static LRESULT on_wm_app_initial_layout([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
+        self.initial_layout_scheduled = false;
 
-    case WM_EXITSIZEMOVE:
-        self.in_size_move = false;
-        KillTimer(hwnd, TIMER_LIVE_RESIZE);
-        layout(self, hwnd);
-        post_model_dirty(self);
-        restart_ui_timer(self, hwnd);
-        return 0;
+        if (self.did_initial_layout) return 0;
 
-    case WM_GETMINMAXINFO: {
-        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        if (mmi) {
-            UINT dpi = self.dpi ? self.dpi : 96;
-            // Minimum window size so all toolbar/action strip controls fit.
-            // 700 accommodates EXE tab: edit+Add+Browse+Stop+Start+Remove+gaps+pad.
-            int minCW = dpi_scale(dpi, 700);
-            int minCH = dpi_scale(dpi, 340);
-            RECT rcw{}, rcc{};
-            if (self.hwnd && GetWindowRect(self.hwnd, &rcw) && GetClientRect(self.hwnd, &rcc)) {
-                int ncW = (rcw.right - rcw.left) - (rcc.right - rcc.left);
-                int ncH = (rcw.bottom - rcw.top) - (rcc.bottom - rcc.top);
-                mmi->ptMinTrackSize.x = minCW + ncW;
-                mmi->ptMinTrackSize.y = minCH + ncH;
-            } else {
-                mmi->ptMinTrackSize.x = minCW;
-                mmi->ptMinTrackSize.y = minCH;
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        int cw = rc.right - rc.left;
+        int ch = rc.bottom - rc.top;
+        if (cw <= 1 || ch <= 1) {
+            if (self.initial_layout_tries++ < 25) {
+                schedule_initial_layout(self, hwnd);
             }
-        }
-        return 0;
-    }
-
-    case WM_SIZE:
-        if (wParam == SIZE_MINIMIZED) {
-            ui_timer_suspend(self, hwnd);
-            self.in_size_move = false;
-            KillTimer(hwnd, TIMER_LIVE_RESIZE);
             return 0;
         }
 
-        if (self.ui_timer_suspended) ui_timer_resume(self, hwnd);
+        UINT dpi_now = get_dpi_for_hwnd(hwnd);
+        if (dpi_now == 0) dpi_now = 96;
+        if (self.dpi == 0) self.dpi = dpi_now;
+
+        if (dpi_now != self.dpi) {
+            UINT oldDpi = self.dpi;
+            UINT newDpi = dpi_now;
+            self.dpi = newDpi;
+
+            if (self.detail_panel_w > 0 && oldDpi && newDpi && oldDpi != newDpi) {
+                self.detail_panel_w = MulDiv(self.detail_panel_w, (int)newDpi, (int)oldDpi);
+            }
+
+            theme_compute(self);
+            theme_apply_all_controls(self);
+
+            lv_scale_columns(self.lv_svc, oldDpi, newDpi);
+            lv_scale_columns(self.lv_exe, oldDpi, newDpi);
+            self.lv_needs_layout[KIND_SVC] = true;
+            self.lv_needs_layout[KIND_EXE] = true;
+
+            listbox_adjust_item_height(self.activity, newDpi);
+        }
 
         layout(self, hwnd);
-        post_model_dirty(self);
+        InvalidateRect(hwnd, NULL, TRUE);
+        UpdateWindow(hwnd);
+
+        self.did_initial_layout = true;
         return 0;
+}
 
-    case WM_NOTIFY: {
-        NMHDR* nh = (NMHDR*)lParam;
-
-        if (nh && (nh->code == HDN_ENDTRACKW || nh->code == HDN_ENDDRAG)) {
-            if (self.lv_svc && nh->hwndFrom == ListView_GetHeader(self.lv_svc)) {
-                capture_columns_now(self, ItemKind::Svc);
-                return 0;
-            }
-            if (self.lv_exe && nh->hwndFrom == ListView_GetHeader(self.lv_exe)) {
-                capture_columns_now(self, ItemKind::Exe);
-                return 0;
-            }
-        }
-        if (nh && nh->code == NM_RCLICK) {
-            HWND hdr_s = self.lv_svc ? ListView_GetHeader(self.lv_svc) : NULL;
-            HWND hdr_e = self.lv_exe ? ListView_GetHeader(self.lv_exe) : NULL;
-            int kind = -1;
-            if (hdr_s && nh->hwndFrom == hdr_s) kind = KIND_SVC;
-            if (hdr_e && nh->hwndFrom == hdr_e) kind = KIND_EXE;
-            if (kind != -1) {
-                POINT pt; GetCursorPos(&pt);
-                HMENU menu = CreatePopupMenu();
-                AppendMenuW(menu, MF_STRING, IDM_RESET_COLUMNS, L"Reset columns");
-                SetForegroundWindow(hwnd);
-                TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
-                DestroyMenu(menu);
-                PostMessageW(hwnd, WM_NULL, 0, 0);
-                return 0;
-            }
-        }
-        {
-            LRESULT handled = 0;
-            if (handle_main_listview_notify(self, hwnd, nh, lParam, handled)) return handled;
-        }
-
-        // Dark-mode custom draw
-        if (nh && nh->code == NM_CUSTOMDRAW) {
-            bool handled = false;
-            LRESULT lr = theme_handle_customdraw(self, nh, lParam, handled);
-            if (handled) return lr;
-        }
-
-        return 0;
-    }
-
-    case WM_ERASEBKGND: {
-        HDC hdc = (HDC)wParam;
-        RECT rc; GetClientRect(hwnd, &rc);
-        FillRect(hdc, &rc, self.theme.br_bg);
-        return 1;
-    }
-    case WM_MEASUREITEM: {
-        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
-        if (!mis) break;
-        if (self.theme.dark_mode && (mis->CtlType == ODT_MENU || mis->CtlType == ODT_TAB)) {
-            HDC hdc = GetDC(hwnd);
-            HFONT oldf = NULL;
-            if (hdc && self.ui_font) oldf = (HFONT)SelectObject(hdc, self.ui_font);
-            SIZE sz{0,0};
-            wchar_t txt[256]{0};
-
-            if (mis->CtlType == ODT_MENU && mis->itemID) {
-                HMENU mb = GetMenu(hwnd);
-                if (mb) GetMenuStringW(mb, mis->itemID, txt, 255, MF_BYCOMMAND);
-                if (txt[0] && hdc) GetTextExtentPoint32W(hdc, txt, (int)wcslen(txt), &sz);
-                mis->itemHeight = (UINT)std::max(18, dpi_scale(self.dpi, 22));
-                mis->itemWidth  = (UINT)std::max(40, (int)sz.cx + dpi_scale(self.dpi, 24));
-            } else if (mis->CtlType == ODT_TAB) {
-                mis->itemHeight = (UINT)std::max(18, dpi_scale(self.dpi, 22));
-            }
-
-            if (hdc && oldf) SelectObject(hdc, oldf);
-            if (hdc) ReleaseDC(hwnd, hdc);
-            return TRUE;
-        }
-        break;
-    }
-    case WM_DRAWITEM: {
-        const DRAWITEMSTRUCT* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-        // Owner-drawn statusbar part (theme-aware text color — Win32 statusbar
-        // ignores NM_CUSTOMDRAW for text, so we render it ourselves).
-        if (dis && dis->CtlID == IDC_STATUSBAR) {
-            RECT rc = dis->rcItem;
-            HBRUSH bg = self.theme.dark_mode ? self.theme.br_panel : GetSysColorBrush(COLOR_BTNFACE);
-            FillRect(dis->hDC, &rc, bg);
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, self.theme.dark_mode ? self.theme.col_text : GetSysColor(COLOR_BTNTEXT));
-            HFONT oldf = NULL;
-            if (self.ui_font) oldf = (HFONT)SelectObject(dis->hDC, self.ui_font);
-            RECT tr = rc;
-            tr.left += 6;  // small left padding matches default statusbar layout
-            DrawTextW(dis->hDC, self.statusbar_text.c_str(), (int)self.statusbar_text.size(), &tr,
-                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
-            if (oldf) SelectObject(dis->hDC, oldf);
-            return TRUE;
-        }
-        // Detail panel separator (themed horizontal line)
-        if (dis && dis->CtlID == IDC_DETAIL_SEP && dis->CtlType == ODT_STATIC) {
-            // Use cached pen in dark mode; light mode uses a stock-ish approach
-            HPEN pen = self.theme.dark_mode ? self.theme.pen_separator : (HPEN)GetStockObject(DC_PEN);
-            HPEN old = (HPEN)SelectObject(dis->hDC, pen);
-            if (!self.theme.dark_mode) SetDCPenColor(dis->hDC, GetSysColor(COLOR_3DSHADOW));
-            int mid = (dis->rcItem.top + dis->rcItem.bottom) / 2;
-            MoveToEx(dis->hDC, dis->rcItem.left, mid, NULL);
-            LineTo(dis->hDC, dis->rcItem.right, mid);
-            SelectObject(dis->hDC, old);
-            return TRUE;
-        }
-        if (theme_draw_owner_button(self, dis)) return TRUE;
-        if (theme_draw_owner_tab(self, dis)) return TRUE;
-        if (theme_draw_owner_menu(self, dis)) return TRUE;
-        break;
-    }
-
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT:
-    case WM_CTLCOLORBTN:
-    case WM_CTLCOLORLISTBOX:
-        return (LRESULT)theme_handle_ctlcolor(self, msg, wParam, lParam);
-
-    case WM_COMMAND: {
+static LRESULT on_wm_command([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
@@ -1229,7 +1207,156 @@ switch (msg) {
         }
         if (id == IDM_TRAY_EXIT) { app_request_exit(self, hwnd); return 0; }
         return 0;
+}
+
+
+static LRESULT AppWndProc(App& self, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+
+if (self.tray.taskbar_restart_msg && msg == self.tray.taskbar_restart_msg) {
+    self.tray.added = false;
+    tray_sync(self, GetModuleHandleW(NULL));
+    return 0;
+}
+
+switch (msg) {
+    case WM_CREATE:
+        return on_wm_create(self, hwnd, msg, wParam, lParam);
+
+    case WM_SHOWWINDOW:
+        if (wParam && !self.did_initial_layout) {
+            schedule_initial_layout(self, hwnd);
+        }
+        return 0;
+
+    case WM_WINDOWPOSCHANGED: {
+        if (!self.did_initial_layout) {
+            const WINDOWPOS* wp = reinterpret_cast<const WINDOWPOS*>(lParam);
+            if (wp && !(wp->flags & SWP_NOSIZE)) {
+                schedule_initial_layout(self, hwnd);
+            }
+        }
+        return 0;
     }
+
+    case WM_APP_INITIAL_LAYOUT:
+        return on_wm_app_initial_layout(self, hwnd, msg, wParam, lParam);
+
+    case WM_DPICHANGED:
+        return on_wm_dpichanged(self, hwnd, msg, wParam, lParam);
+
+    case WM_SETTINGCHANGE:
+        return on_wm_settingchange(self, hwnd, msg, wParam, lParam);
+
+    case WM_ENTERSIZEMOVE:
+        self.in_size_move = true;
+        SetTimer(hwnd, TIMER_LIVE_RESIZE, 16, NULL);
+        return 0;
+
+    case WM_EXITSIZEMOVE:
+        self.in_size_move = false;
+        KillTimer(hwnd, TIMER_LIVE_RESIZE);
+        layout(self, hwnd);
+        post_model_dirty(self);
+        restart_ui_timer(self, hwnd);
+        return 0;
+
+    case WM_GETMINMAXINFO:
+        return on_wm_getminmaxinfo(self, hwnd, msg, wParam, lParam);
+
+    case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) {
+            ui_timer_suspend(self, hwnd);
+            self.in_size_move = false;
+            KillTimer(hwnd, TIMER_LIVE_RESIZE);
+            return 0;
+        }
+
+        if (self.ui_timer_suspended) ui_timer_resume(self, hwnd);
+
+        layout(self, hwnd);
+        post_model_dirty(self);
+        return 0;
+
+    case WM_NOTIFY:
+        return on_wm_notify(self, hwnd, msg, wParam, lParam);
+
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, self.theme.br_bg);
+        return 1;
+    }
+    case WM_MEASUREITEM: {
+        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+        if (!mis) break;
+        if (self.theme.dark_mode && (mis->CtlType == ODT_MENU || mis->CtlType == ODT_TAB)) {
+            HDC hdc = GetDC(hwnd);
+            HFONT oldf = NULL;
+            if (hdc && self.ui_font) oldf = (HFONT)SelectObject(hdc, self.ui_font);
+            SIZE sz{0,0};
+            wchar_t txt[256]{0};
+
+            if (mis->CtlType == ODT_MENU && mis->itemID) {
+                HMENU mb = GetMenu(hwnd);
+                if (mb) GetMenuStringW(mb, mis->itemID, txt, 255, MF_BYCOMMAND);
+                if (txt[0] && hdc) GetTextExtentPoint32W(hdc, txt, (int)wcslen(txt), &sz);
+                mis->itemHeight = (UINT)std::max(18, dpi_scale(self.dpi, 22));
+                mis->itemWidth  = (UINT)std::max(40, (int)sz.cx + dpi_scale(self.dpi, 24));
+            } else if (mis->CtlType == ODT_TAB) {
+                mis->itemHeight = (UINT)std::max(18, dpi_scale(self.dpi, 22));
+            }
+
+            if (hdc && oldf) SelectObject(hdc, oldf);
+            if (hdc) ReleaseDC(hwnd, hdc);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        // Owner-drawn statusbar part (theme-aware text color — Win32 statusbar
+        // ignores NM_CUSTOMDRAW for text, so we render it ourselves).
+        if (dis && dis->CtlID == IDC_STATUSBAR) {
+            RECT rc = dis->rcItem;
+            HBRUSH bg = self.theme.dark_mode ? self.theme.br_panel : GetSysColorBrush(COLOR_BTNFACE);
+            FillRect(dis->hDC, &rc, bg);
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, self.theme.dark_mode ? self.theme.col_text : GetSysColor(COLOR_BTNTEXT));
+            HFONT oldf = NULL;
+            if (self.ui_font) oldf = (HFONT)SelectObject(dis->hDC, self.ui_font);
+            RECT tr = rc;
+            tr.left += 6;  // small left padding matches default statusbar layout
+            DrawTextW(dis->hDC, self.statusbar_text.c_str(), (int)self.statusbar_text.size(), &tr,
+                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+            if (oldf) SelectObject(dis->hDC, oldf);
+            return TRUE;
+        }
+        // Detail panel separator (themed horizontal line)
+        if (dis && dis->CtlID == IDC_DETAIL_SEP && dis->CtlType == ODT_STATIC) {
+            // Use cached pen in dark mode; light mode uses a stock-ish approach
+            HPEN pen = self.theme.dark_mode ? self.theme.pen_separator : (HPEN)GetStockObject(DC_PEN);
+            HPEN old = (HPEN)SelectObject(dis->hDC, pen);
+            if (!self.theme.dark_mode) SetDCPenColor(dis->hDC, GetSysColor(COLOR_3DSHADOW));
+            int mid = (dis->rcItem.top + dis->rcItem.bottom) / 2;
+            MoveToEx(dis->hDC, dis->rcItem.left, mid, NULL);
+            LineTo(dis->hDC, dis->rcItem.right, mid);
+            SelectObject(dis->hDC, old);
+            return TRUE;
+        }
+        if (theme_draw_owner_button(self, dis)) return TRUE;
+        if (theme_draw_owner_tab(self, dis)) return TRUE;
+        if (theme_draw_owner_menu(self, dis)) return TRUE;
+        break;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)theme_handle_ctlcolor(self, msg, wParam, lParam);
+
+    case WM_COMMAND:
+        return on_wm_command(self, hwnd, msg, wParam, lParam);
 
     case WM_APP_PROFILE_SWITCH: {
         int idx = (int)(INT_PTR)wParam;
@@ -1308,102 +1435,8 @@ switch (msg) {
         }
         return 0;
 
-    case WM_CONTEXTMENU: {
-        HWND target = (HWND)wParam;
-        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-
-        if (target == self.lv_svc || target == self.lv_exe) {
-            ItemKind kind = (target == self.lv_svc) ? ItemKind::Svc : ItemKind::Exe;
-            HWND lv = (kind == ItemKind::Svc) ? self.lv_svc : self.lv_exe;
-
-            if (pt.x == -1 && pt.y == -1) {
-                int sel = ListView_GetNextItem(lv, -1, LVNI_SELECTED);
-                if (sel < 0) sel = ListView_GetSelectionMark(lv);
-                RECT ir{};
-                if (sel >= 0 && ListView_GetItemRect(lv, sel, &ir, LVIR_BOUNDS)) {
-                    pt.x = ir.left + 20;
-                    pt.y = ir.top + 20;
-                    ClientToScreen(lv, &pt);
-                } else {
-                    GetCursorPos(&pt);
-                }
-            } else {
-                POINT cpt = pt;
-                ScreenToClient(lv, &cpt);
-                LVHITTESTINFO ht{};
-                ht.pt = cpt;
-                int hit = ListView_HitTest(lv, &ht);
-                if (hit >= 0) {
-                    ListView_SetItemState(lv, hit, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-                    ListView_EnsureVisible(lv, hit, FALSE);
-                }
-            }
-
-            HMENU m = CreatePopupMenu();
-            if (!m) return 0;
-
-            AppendMenuW(m, MF_STRING, IDM_CTX_STOP, L"Stop");
-            AppendMenuW(m, MF_STRING, IDM_CTX_REMOVE, L"Remove");
-            AppendMenuW(m, MF_STRING, IDM_CTX_TOGGLE_AUTO, L"Toggle auto-stop");
-            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-            AppendMenuW(m, MF_STRING, IDM_CTX_COPY_NAME, L"Copy name");
-            if (kind == ItemKind::Exe) AppendMenuW(m, MF_STRING, IDM_CTX_OPEN_LOC, L"Open file location");
-
-            SetForegroundWindow(hwnd);
-            UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-            DestroyMenu(m);
-
-            switch (cmd) {
-            case IDM_CTX_STOP:        stop_selected(self, kind); break;
-            case IDM_CTX_REMOVE:      remove_selected(self, kind); break;
-            case IDM_CTX_TOGGLE_AUTO: toggle_autostop_selected(self, kind); break;
-            case IDM_CTX_COPY_NAME: {
-                Item* it = lv_get_selected_item_ptr(self, kind);
-                if (it) clipboard_set_text(hwnd, it->name.c_str());
-            } break;
-            case IDM_CTX_OPEN_LOC: {
-                Item* it = lv_get_selected_item_ptr(self, kind);
-                if (it) open_file_location_best_effort(self, it->name.c_str());
-            } break;
-            default: break;
-            }
-            return 0;
-        }
-
-        // Activity log context menu
-        if (target == self.activity) {
-            if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt);
-
-            int sel = (int)SendMessageW(self.activity, LB_GETCURSEL, 0, 0);
-
-            HMENU m = CreatePopupMenu();
-            if (!m) return 0;
-
-            AppendMenuW(m, MF_STRING | (sel >= 0 ? 0 : MF_GRAYED), IDM_LOG_COPY_LINE, L"Copy line");
-            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-            int count = (int)SendMessageW(self.activity, LB_GETCOUNT, 0, 0);
-            AppendMenuW(m, MF_STRING | (count > 0 ? 0 : MF_GRAYED), IDM_LOG_CLEAR_ALL, L"Clear all");
-
-            SetForegroundWindow(hwnd);
-            UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-            DestroyMenu(m);
-
-            if (cmd == IDM_LOG_COPY_LINE && sel >= 0) {
-                int len = (int)SendMessageW(self.activity, LB_GETTEXTLEN, (WPARAM)sel, 0);
-                if (len > 0) {
-                    std::wstring txt((size_t)len + 1, L'\0');
-                    SendMessageW(self.activity, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
-                    txt.resize((size_t)len);
-                    clipboard_set_text(hwnd, txt.c_str());
-                }
-            } else if (cmd == IDM_LOG_CLEAR_ALL) {
-                SendMessageW(self.activity, LB_RESETCONTENT, 0, 0);
-            }
-            return 0;
-        }
-
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
+    case WM_CONTEXTMENU:
+        return on_wm_contextmenu(self, hwnd, msg, wParam, lParam);
 
     case WM_APP_TRAYICON: {
         const UINT ev = (UINT)LOWORD(lParam);
