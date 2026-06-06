@@ -261,6 +261,81 @@ static bool sleep_ms_cooperative(std::stop_token st, App& self, DWORD total_ms) 
     return st.stop_requested();
 }
 
+// Shared AUTO-STOP enforcement tail for both kinds. The status-detection loops
+// differ per kind (svc queries SCM; exe derives from process counts) and stay
+// inline at the call sites, producing `enforce_idx`. From there the work is
+// identical: resolve each index to its Item under the model lock, bump the
+// auto-stop counter, then (lock released) log and enqueue the stop action.
+//
+// `honor_suppress` is true only for services, which carry a stop-error backoff
+// (svc_stop_suppress_until_ms) that temporarily disables AUTO-STOP after repeated
+// failures. The "(was %s)" log uses the per-item status string, which is exactly
+// "running" for exes — matching the previous hard-coded "(was running)" text.
+//
+// NOTE: action_enqueue MUST run without the model lock held (lock-order rule);
+// the enqueue loop is deliberately outside the ModelLockGuard scope.
+static void enforce_autostop_kind(App& self, ItemKind kind,
+                                  const std::vector<std::wstring>& names,
+                                  const std::vector<StatusStr>& statuses,
+                                  const std::vector<size_t>& enforce_idx,
+                                  size_t n, uint64_t mono_now, int stop_wait_ms,
+                                  bool honor_suppress) {
+    if (enforce_idx.empty()) return;
+    const int K = ki(kind);
+
+    std::vector<int> counts;
+    counts.reserve(enforce_idx.size());
+
+    {
+        ModelLockGuard lk(self);
+        for (size_t j = 0; j < enforce_idx.size(); ++j) {
+            const size_t idx = enforce_idx[j];
+            Item* it = nullptr;
+            if (idx < self.items[K].v.size()) {
+                Item* cand = self.items[K].v[idx].get();
+                if (cand && idx < names.size() && !names[idx].empty() &&
+                    _wcsicmp(cand->name.c_str(), names[idx].c_str()) == 0) {
+                    it = cand;
+                }
+            }
+            if (!it && idx < names.size() && !names[idx].empty()) {
+                // Fallback: list changed since snapshot; find by name (rare)
+                it = list_find(&self.items[K], names[idx].c_str());
+            }
+            if (it) {
+                // If we recently saw repeated stop errors, temporarily suppress AUTO-STOP.
+                if (honor_suppress && it->svc_stop_suppress_until_ms &&
+                    mono_now < it->svc_stop_suppress_until_ms) {
+                    counts.push_back(0);
+                    continue;
+                }
+                it->last_autostop_mono_ms = mono_now;
+                it->autostop_count++;
+                counts.push_back(it->autostop_count);
+            } else {
+                counts.push_back(0);
+            }
+        }
+    }
+
+    for (size_t j = 0; j < enforce_idx.size(); ++j) {
+        const size_t idx = enforce_idx[j];
+        const int c = counts[j];
+        if (c <= 0) continue;
+        if (idx >= n || idx >= names.size() || names[idx].empty()) continue;
+
+        wchar_t msg[600];
+        StringCchPrintfW(msg, 600, L"%s: AUTO-STOP enforce #%d (was %s) requested…",
+                         names[idx].c_str(), c,
+                         (idx < statuses.size() ? statuses[idx].buf : L""));
+        post_log(self, msg);
+
+        wchar_t reason[256];
+        StringCchPrintfW(reason, 256, L"AUTO-STOP enforce #%d", c);
+        action_enqueue(self, kind, ACTION_STOP, names[idx].c_str(), reason, stop_wait_ms);
+    }
+}
+
 void monitor_thread_main(std::stop_token st, App* self_ptr) {
     App& self = *self_ptr;
     MonSnap snap;
@@ -438,56 +513,9 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
                 }
             }
 
-            if (!svc_enforce_idx.empty()) {
-                std::vector<int> svc_counts;
-                svc_counts.reserve(svc_enforce_idx.size());
-
-                {
-                    ModelLockGuard lk(self);
-                    for (size_t j = 0; j < svc_enforce_idx.size(); ++j) {
-                        const size_t idx = svc_enforce_idx[j];
-                        Item* it = nullptr;
-                        if (idx < self.items[KIND_SVC].v.size()) {
-                            Item* cand = self.items[KIND_SVC].v[idx].get();
-                            if (cand && !snap.svc_names[idx].empty() && _wcsicmp(cand->name.c_str(), snap.svc_names[idx].c_str()) == 0) {
-                                it = cand;
-                            }
-                        }
-                        if (!it && idx < snap.ns && !snap.svc_names[idx].empty()) {
-                            // Fallback: list changed since snapshot; find by name (rare)
-                            it = list_find(&self.items[KIND_SVC], snap.svc_names[idx].c_str());
-                        }
-                        if (it) {
-                            // If we recently saw repeated stop errors for this service, temporarily suppress AUTO-STOP.
-                            if (it->svc_stop_suppress_until_ms && mono_now < it->svc_stop_suppress_until_ms) {
-                                svc_counts.push_back(0);
-                                continue;
-                            }
-                            it->last_autostop_mono_ms = mono_now;
-                            it->autostop_count++;
-                            svc_counts.push_back(it->autostop_count);
-                        } else {
-                            svc_counts.push_back(0);
-                        }
-                    }
-                }
-
-                for (size_t j = 0; j < svc_enforce_idx.size(); ++j) {
-                    const size_t idx = svc_enforce_idx[j];
-                    const int c = svc_counts[j];
-                    if (c <= 0) continue;
-                    if (idx >= ns || snap.svc_names[idx].empty()) continue;
-
-                    wchar_t msg[600];
-                    StringCchPrintfW(msg, 600, L"%s: AUTO-STOP enforce #%d (was %s) requested\u2026",
-                                     snap.svc_names[idx].c_str(), c, sc.svc_status[idx].buf);
-                    post_log(self, msg);
-
-                    wchar_t reason[256];
-                    StringCchPrintfW(reason, 256, L"AUTO-STOP enforce #%d", c);
-                    action_enqueue(self, ItemKind::Svc, ACTION_STOP, snap.svc_names[idx].c_str(), reason, stop_wait_ms);
-                }
-            }
+            enforce_autostop_kind(self, ItemKind::Svc, snap.svc_names, sc.svc_status,
+                                   svc_enforce_idx, ns, mono_now, stop_wait_ms,
+                                   /*honor_suppress=*/true);
 
             // Option A: one message per kind per tick
             post_status_bulk(self, ItemKind::Svc, snap.svc_names, snap.svc_uids, sc.svc_status, ns, wall_now);
@@ -519,51 +547,9 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
                 }
             }
 
-            if (!exe_enforce_idx.empty()) {
-                std::vector<int> exe_counts2;
-                exe_counts2.reserve(exe_enforce_idx.size());
-
-                {
-                    ModelLockGuard lk(self);
-                    for (size_t j = 0; j < exe_enforce_idx.size(); ++j) {
-                        const size_t idx = exe_enforce_idx[j];
-                        Item* it = nullptr;
-                        if (idx < self.items[KIND_EXE].v.size()) {
-                            Item* cand = self.items[KIND_EXE].v[idx].get();
-                            if (cand && !snap.exe_names[idx].empty() && _wcsicmp(cand->name.c_str(), snap.exe_names[idx].c_str()) == 0) {
-                                it = cand;
-                            }
-                        }
-                        if (!it && idx < snap.ne && !snap.exe_names[idx].empty()) {
-                            // Fallback: list changed since snapshot; find by name (rare)
-                            it = list_find(&self.items[KIND_EXE], snap.exe_names[idx].c_str());
-                        }
-                        if (it) {
-                            it->last_autostop_mono_ms = mono_now;
-                            it->autostop_count++;
-                            exe_counts2.push_back(it->autostop_count);
-                        } else {
-                            exe_counts2.push_back(0);
-                        }
-                    }
-                }
-
-                for (size_t j = 0; j < exe_enforce_idx.size(); ++j) {
-                    const size_t idx = exe_enforce_idx[j];
-                    const int k = exe_counts2[j];
-                    if (k <= 0) continue;
-                    if (idx >= ne || snap.exe_names[idx].empty()) continue;
-
-                    wchar_t msg[600];
-                    StringCchPrintfW(msg, 600, L"%s: AUTO-STOP enforce #%d (was running) requested\u2026",
-                                     snap.exe_names[idx].c_str(), k);
-                    post_log(self, msg);
-
-                    wchar_t reason[256];
-                    StringCchPrintfW(reason, 256, L"AUTO-STOP enforce #%d", k);
-                    action_enqueue(self, ItemKind::Exe, ACTION_STOP, snap.exe_names[idx].c_str(), reason, stop_wait_ms);
-                }
-            }
+            enforce_autostop_kind(self, ItemKind::Exe, snap.exe_names, sc.exe_status,
+                                   exe_enforce_idx, ne, mono_now, stop_wait_ms,
+                                   /*honor_suppress=*/false);
 
             post_status_bulk(self, ItemKind::Exe, snap.exe_names, snap.exe_uids, sc.exe_status, ne, wall_now);
         }
