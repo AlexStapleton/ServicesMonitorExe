@@ -63,25 +63,25 @@ static LRESULT CALLBACK SplitterProc(HWND sw, UINT msg, WPARAM wParam, LPARAM lP
 
     case WM_LBUTTONDOWN: {
         SetCapture(sw);
-        self.splitter_dragging = true;
+        self.layout_state.splitter_dragging = true;
 
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(self.hwnd, &pt);
 
-        self.splitter_drag_start_x = pt.x;
-        self.splitter_drag_start_w = (self.detail_panel_w > 0) ? self.detail_panel_w : DETAIL_DEFAULT_W;
+        self.layout_state.splitter_drag_start_x = pt.x;
+        self.layout_state.splitter_drag_start_w = (self.detail_panel_w > 0) ? self.detail_panel_w : DETAIL_DEFAULT_W;
         return 0;
     }
 
     case WM_MOUSEMOVE:
-        if (self.splitter_dragging) {
+        if (self.layout_state.splitter_dragging) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(self.hwnd, &pt);
 
-            int dx = pt.x - self.splitter_drag_start_x;
-            int desired = self.splitter_drag_start_w - dx; // drag right => narrower detail panel
+            int dx = pt.x - self.layout_state.splitter_drag_start_x;
+            int desired = self.layout_state.splitter_drag_start_w - dx; // drag right => narrower detail panel
             self.detail_panel_w = desired;
 
             // Layout clamps sizes; keep it snappy during drags.
@@ -91,8 +91,8 @@ static LRESULT CALLBACK SplitterProc(HWND sw, UINT msg, WPARAM wParam, LPARAM lP
         return 0;
 
     case WM_LBUTTONUP:
-        if (self.splitter_dragging) {
-            self.splitter_dragging = false;
+        if (self.layout_state.splitter_dragging) {
+            self.layout_state.splitter_dragging = false;
             ReleaseCapture();
             request_save_debounced(self);
             return 0;
@@ -100,7 +100,7 @@ static LRESULT CALLBACK SplitterProc(HWND sw, UINT msg, WPARAM wParam, LPARAM lP
         return 0;
 
     case WM_CAPTURECHANGED:
-        self.splitter_dragging = false;
+        self.layout_state.splitter_dragging = false;
         return 0;
 
     case WM_ERASEBKGND:

@@ -483,6 +483,25 @@ struct ThreadState {
 // --------------------------------------------------
 // App State (god object with sub-structs)
 // --------------------------------------------------
+// Layout / resize mechanics (UI-thread only): splitter drag tracking, the
+// one-time initial-layout stabilization, and live-resize state. Grouped out of
+// the App god-object (item 4.2) since these fields are only touched together by
+// the layout/resize code paths.
+struct LayoutState {
+    bool splitter_dragging = false;
+    int  splitter_drag_start_x = 0;
+    int  splitter_drag_start_w = 0;
+    bool hsplit_dragging = false;
+    int  hsplit_drag_start_y = 0;
+    int  hsplit_drag_start_h = 0;
+
+    bool did_initial_layout = false;
+    bool initial_layout_scheduled = false;
+    UINT initial_layout_tries = 0;
+
+    bool in_size_move = false;
+};
+
 struct App {
     HWND hwnd = NULL;
     HACCEL accel = NULL;
@@ -564,12 +583,7 @@ struct App {
 
     HWND splitter = NULL;
     HWND hsplit_activity = NULL;
-    bool splitter_dragging = false;
-    int  splitter_drag_start_x = 0;
-    int  splitter_drag_start_w = 0;
-    bool hsplit_dragging = false;
-    int  hsplit_drag_start_y = 0;
-    int  hsplit_drag_start_h = 0;
+    LayoutState layout_state;   // splitter/hsplit drag, initial-layout, live-resize
     HFONT ui_font = NULL;
     std::unordered_map<UINT, HFONT> ui_font_cache;
 
@@ -600,14 +614,9 @@ struct App {
     ThemeState theme;
     uint32_t ui_seen_theme_gen = 0;
 
-    bool did_initial_layout = false;
-    bool initial_layout_scheduled = false;
-    UINT initial_layout_tries = 0;
-
     uint32_t ui_seen_status_gen[2]{};
     bool ui_dirty_posted = false;
     bool ui_timer_suspended = false;
-    bool in_size_move = false;
 
     ThreadState threads;
 

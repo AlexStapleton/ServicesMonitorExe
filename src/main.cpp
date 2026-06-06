@@ -586,9 +586,9 @@ static LRESULT on_wm_app_initial_layout([[maybe_unused]] App& self, [[maybe_unus
 static LRESULT on_wm_command([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam);
 
 static void schedule_initial_layout(App& self, HWND hwnd) {
-    if (self.did_initial_layout) return;
-    if (self.initial_layout_scheduled) return;
-    self.initial_layout_scheduled = true;
+    if (self.layout_state.did_initial_layout) return;
+    if (self.layout_state.initial_layout_scheduled) return;
+    self.layout_state.initial_layout_scheduled = true;
     PostMessageW(hwnd, WM_APP_INITIAL_LAYOUT, 0, 0);
 }
 
@@ -920,16 +920,16 @@ static LRESULT on_wm_settingchange([[maybe_unused]] App& self, [[maybe_unused]] 
 }
 
 static LRESULT on_wm_app_initial_layout([[maybe_unused]] App& self, [[maybe_unused]] HWND hwnd, [[maybe_unused]] UINT msg, [[maybe_unused]] WPARAM wParam, [[maybe_unused]] LPARAM lParam) {
-        self.initial_layout_scheduled = false;
+        self.layout_state.initial_layout_scheduled = false;
 
-        if (self.did_initial_layout) return 0;
+        if (self.layout_state.did_initial_layout) return 0;
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
         int cw = rc.right - rc.left;
         int ch = rc.bottom - rc.top;
         if (cw <= 1 || ch <= 1) {
-            if (self.initial_layout_tries++ < 25) {
+            if (self.layout_state.initial_layout_tries++ < 25) {
                 schedule_initial_layout(self, hwnd);
             }
             return 0;
@@ -963,7 +963,7 @@ static LRESULT on_wm_app_initial_layout([[maybe_unused]] App& self, [[maybe_unus
         InvalidateRect(hwnd, NULL, TRUE);
         UpdateWindow(hwnd);
 
-        self.did_initial_layout = true;
+        self.layout_state.did_initial_layout = true;
         return 0;
 }
 
@@ -1223,13 +1223,13 @@ switch (msg) {
         return on_wm_create(self, hwnd, msg, wParam, lParam);
 
     case WM_SHOWWINDOW:
-        if (wParam && !self.did_initial_layout) {
+        if (wParam && !self.layout_state.did_initial_layout) {
             schedule_initial_layout(self, hwnd);
         }
         return 0;
 
     case WM_WINDOWPOSCHANGED: {
-        if (!self.did_initial_layout) {
+        if (!self.layout_state.did_initial_layout) {
             const WINDOWPOS* wp = reinterpret_cast<const WINDOWPOS*>(lParam);
             if (wp && !(wp->flags & SWP_NOSIZE)) {
                 schedule_initial_layout(self, hwnd);
@@ -1248,12 +1248,12 @@ switch (msg) {
         return on_wm_settingchange(self, hwnd, msg, wParam, lParam);
 
     case WM_ENTERSIZEMOVE:
-        self.in_size_move = true;
+        self.layout_state.in_size_move = true;
         SetTimer(hwnd, TIMER_LIVE_RESIZE, 16, NULL);
         return 0;
 
     case WM_EXITSIZEMOVE:
-        self.in_size_move = false;
+        self.layout_state.in_size_move = false;
         KillTimer(hwnd, TIMER_LIVE_RESIZE);
         layout(self, hwnd);
         post_model_dirty(self);
@@ -1266,7 +1266,7 @@ switch (msg) {
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED) {
             ui_timer_suspend(self, hwnd);
-            self.in_size_move = false;
+            self.layout_state.in_size_move = false;
             KillTimer(hwnd, TIMER_LIVE_RESIZE);
             return 0;
         }
@@ -1428,7 +1428,7 @@ switch (msg) {
             return 0;
         }
         if (wParam == TIMER_LIVE_RESIZE) {
-            if (self.in_size_move) {
+            if (self.layout_state.in_size_move) {
                 layout(self, hwnd);
             }
             return 0;
@@ -1568,9 +1568,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int show) {
 
     self.tray.enabled = true;
 
-    self.did_initial_layout = false;
-    self.initial_layout_scheduled = false;
-    self.initial_layout_tries = 0;
+    self.layout_state.did_initial_layout = false;
+    self.layout_state.initial_layout_scheduled = false;
+    self.layout_state.initial_layout_tries = 0;
 
     load_config(self);
     darkmode_set_app(self.theme.dark_mode);
