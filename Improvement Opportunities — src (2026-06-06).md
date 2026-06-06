@@ -7,6 +7,29 @@
 
 ---
 
+## Progress checklist (updated 2026-06-06)
+
+Implemented this round (each its own git commit; build verified clean via `make` after every change):
+
+- [x] **5.1** — `git init` + `.gitignore` + initial commit; deleted `Archive - Old Versions/` (195 files) and `Windows 10 Versions/` (recoverable from the initial commit).
+- [x] **4.1** — monolith copies retired (already archived by the author; `src/` is the sole source).
+- [x] **5.2** — consolidated analysis docs down to this one living file (retired stale `ANALYSIS.md`).
+- [x] **2.1** — UTF-8 BOM stripped on config load (`config.cpp`).
+- [x] **2.2** — `config_version` marker emitted + read, with newer-than-current detection (`config.cpp`).
+- [x] **2.3** — config row writes are now truncation-proof via `write_wfmt` (the data-loss path). *Log-message truncation (cosmetic) deliberately left.*
+- [x] **1.1** — `post_status_bulk` resolves items by stable `uid` (O(1)) instead of per-tick name rehash.
+
+Open / not started:
+
+- [ ] **3.1** — elevation model (MEDIUM) — **needs a product decision** (see item).
+- [ ] **4.2** — group loose `App` UI/window members into sub-structs (MEDIUM, no functional change; large churn, no tests).
+- [ ] **4.3** — split the large `AppWndProc` switch (MEDIUM, behavior-preserving; regression risk without runtime tests).
+- [ ] **4.4** — standardize on `ItemKind` over the dual `int`/enum representation (LOW).
+- [ ] **1.2** — avoid per-tick `auto`/`lastreq` copy under the model lock (LOW; only matters at large item counts).
+- [ ] **2.2b** — config integrity beyond the version line (optional checksum) — not pursued.
+
+---
+
 ## Already fixed since the last review (verified in `src/`)
 
 These were flagged previously and are **done** — listed so they are not re-investigated:
