@@ -66,7 +66,8 @@ void update_detail_panel(App& self, ItemKind kind, Item* it) {
         sk = it->status_kind;
     }
     self.detail_uid = it->uid;
-    for (HWND h : item_ctrls) if (h) ShowWindow(h, SW_SHOW);
+    // detail_desc visibility is owned by layout() (hidden when the card is too short).
+    for (HWND h : item_ctrls) if (h && h != self.detail_desc) ShowWindow(h, SW_SHOW);
 
     if (self.detail_name) SetWindowTextW(self.detail_name, it->name.c_str());
 

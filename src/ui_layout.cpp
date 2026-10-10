@@ -441,15 +441,20 @@ void update_statusbar(App& self) {
     if (prof.empty()) prof = L"Default";
 
     // Tab labels carry counts; only touch them when the text actually changes.
-    auto set_if_changed = [](HWND h, const std::wstring& text) {
-        if (!h) return;
+    auto set_if_changed = [](HWND h, const std::wstring& text) -> bool {
+        if (!h) return false;
         wchar_t cur[128]{};
         GetWindowTextW(h, cur, 127);
-        if (text != cur) { SetWindowTextW(h, text.c_str()); InvalidateRect(h, NULL, FALSE); }
+        if (text == cur) return false;
+        SetWindowTextW(h, text.c_str());
+        InvalidateRect(h, NULL, FALSE);
+        return true;
     };
-    set_if_changed(self.toolbar_tab_svc, L"Services  " + std::to_wstring(n[KIND_SVC]));
-    set_if_changed(self.toolbar_tab_exe, L"Executables  " + std::to_wstring(n[KIND_EXE]));
+    bool tabs_changed = set_if_changed(self.toolbar_tab_svc, L"Services  " + std::to_wstring(n[KIND_SVC]));
+    tabs_changed |= set_if_changed(self.toolbar_tab_exe, L"Executables  " + std::to_wstring(n[KIND_EXE]));
     set_if_changed(self.toolbar_profiles, L"Profile: " + prof);
+    // Tab widths are measured from their text in layout().
+    if (tabs_changed && self.hwnd && self.layout_state.did_initial_layout) layout(self, self.hwnd);
 
     // Summary for the active tab, painted at the right of the add row.
     wchar_t sum[160];
@@ -567,8 +572,12 @@ void apply_saved_columns(App& self, ItemKind kind) {
     }
     ListView_SetColumnOrderArray(lv, ncol, order);
 
+    UINT dpi = self.dpi ? self.dpi : get_dpi_for_hwnd(lv);
     for (int i = 0; i < ncol; i++) {
         int w = self.cols_w[k][i];
+        // Column 0 is now labelled "Auto-stop"; widen widths saved by older
+        // versions (40px checkbox-only column) so the header isn't clipped.
+        if (i == 0 && w > 10 && w < dpi_scale(dpi, 70)) w = dpi_scale(dpi, 84);
         if (w > 10) ListView_SetColumnWidth(lv, i, w);
     }
 }
@@ -799,8 +808,12 @@ void layout(App& self, HWND hwnd) {
         const bool show_open = (self.active_tab == 1) && self.detail_uid;
         const int rows = 2;
         int by = mainH - pad - rows * btnH - (rows - 1) * g;
+        // Never let the buttons ride up over the text when the card is short;
+        // the description simply collapses (and the buttons clip at the bottom).
+        if (by < dy) by = dy;
         int descH = std::max(0, by - g - dy);
         place(self.detail_desc, descH, 0);
+        if (self.detail_desc) ShowWindow(self.detail_desc, (descH >= S(24) && self.detail_uid) ? SW_SHOW : SW_HIDE);
 
         const int bw = (dw - g) / 2;
         SetWindowPos(self.detail_stop_btn, NULL, pad, by, bw, btnH, SWP_NOZORDER);

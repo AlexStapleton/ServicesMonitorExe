@@ -1669,8 +1669,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int show) {
 
     int start_x = CW_USEDEFAULT;
     int start_y = CW_USEDEFAULT;
-    int start_w = 1100;
-    int start_h = 600;
+    // First-run size scaled for the system DPI (saved placement wins below).
+    const UINT sys_dpi = g_dll_cache.GetDpiForSystem ? g_dll_cache.GetDpiForSystem() : 96;
+    int start_w = dpi_scale(sys_dpi, 1180);
+    int start_h = dpi_scale(sys_dpi, 720);
     if (self.have_win_rect) {
         start_x = self.win_x;
         start_y = self.win_y;
