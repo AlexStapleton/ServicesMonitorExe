@@ -2,7 +2,7 @@
 
 **Scope:** The modular `src/` build (`main.cpp`, `monitor.cpp`, `action.cpp`, `config.cpp`, `profiles.cpp`, `theme.cpp`, `darkmode.cpp`, `tray.cpp`, `ui_*.cpp`, `app.h`, `util.*`), built via the `Makefile` → `ServicesExeMonitor.exe`. As of 2026-06-06 this is the **canonical source of truth**; the single-file `ServicesExeMonitor_Claude_v1.cpp` / `_v2.cpp` monoliths are now secondary.
 
-**Date:** 2026-06-06
+**Date:** 2026-06-06 (updated 2026-10-10 — see *UI & performance pass*)
 **Supersedes:** the analysis in `Improvement Opportunities.md` (2026-06-02), which was written against the v1 monolith and is now partly stale (see "Already fixed" below). Older docs (`ANALYSIS.md`, `PERFORMANCE_ANALYSIS.md`, `FINAL_ANALYSIS.md`, `Code_Review_Claude_v1.md`) describe still-older revisions.
 
 ---
@@ -35,6 +35,54 @@ Not pursued:
 - [ ] **2.2b** — config integrity beyond the version line (optional checksum).
 
 ---
+
+## UI & performance pass (2026-10-10)
+
+Request: "the UI still isn't great — make it better, both performance and UI."
+Decisions confirmed with the author before implementation:
+
+| Question | Decision |
+|---|---|
+| UI technology | **Modernize the existing Win32 UI in place** (keep single static `.exe`, MinGW build, threading/config code). Rejected: Dear ImGui (non-native, accessibility/IME, larger rewrite), WinUI 3 (MSVC + Windows App SDK runtime + packaging; a third rewrite). |
+| Scope | Performance fixes **and** UI overhaul, implemented. |
+| Target OS | **Windows 10 and 11** — icon glyphs use *Segoe Fluent Icons* when present, else *Segoe MDL2 Assets* (same code points), else text labels. |
+| Pain points | Looks dated · cluttered layout · clunky dialogs. |
+
+### Performance
+
+- [x] **P1 — Event-driven service detection.** The monitor thread now waits *alertably* on an auto-reset event (replacing the condition variable on the model mutex) and arms a one-shot `NotifyServiceStatusChangeW` per monitored service, with the service's *current* state excluded from the mask (otherwise the SCM fires immediately and the thread spins). The APC sets a flag; the wait returns and a tick runs. Notification ticks are spaced ≥100 ms apart. Polling remains the fallback; registrations that fail permanently fall back to polling for that service. Lifetime rule: `SERVICE_NOTIFY` slots are heap-allocated and freed only after their handle is closed **and** queued APCs are drained (`SleepEx(0, TRUE)`), per the API contract.
+  *Measured under Wine with a 10 s poll interval: a manually started auto-stop service was stopped again in ~0.15 s.*
+- [x] **P2 — Bug: UI refresh woke the monitor.** `post_model_dirty()` (run on every UI refresh-timer tick and every status repaint) also woke the monitor, so it effectively polled at the UI refresh rate regardless of `monitor_interval_ms` (measured: the original build re-stopped a service in ~0.85 s with a 10 s interval — i.e. it was doing ~1 Hz polling). Wakes are now explicit: add/remove, auto-stop toggle, Preferences apply, profile switch, config load.
+  *Behavior note:* executables are still detected by polling, so a long "Check every" interval now really is that long for EXEs (defaults unchanged at 1 s).
+- [x] **P3 — Missing services reconnected to the SCM every tick.** The "unknown" fallback called `query_service_status_fast()`, which opened a new SCM connection per missing service per tick and then failed the same way. Decided on the shared handle instead.
+- [x] **P4 — Startup:** no longer enumerates every installed service before the first paint (the display-name cache was already built lazily on first Add).
+- [x] **P5 —** removed `FreeLibrary()` on a `GetModuleHandleW(user32)` handle.
+- Not done (deliberately): event-driven *process* start detection (ETW kernel-process provider or WMI). ETW is the only low-overhead option and is a substantial, admin-only subsystem; the Toolhelp snapshot is already skipped when unused. Revisit if EXE enforcement latency matters.
+
+### UI
+
+- [x] **Visual system** (`theme.cpp`, `darkmode.cpp`): owned Win11-like palette in both modes (light mode previously borrowed 3D system colors — the Windows-95 look); one painter for *all* push buttons (flat, rounded, hover/pressed/focus/disabled, accent fill, icon glyph); Win11 "selector bar" tabs; flat splitters; rounded input frames with focus underline; card surface for details; hairline frames for list and log.
+- [x] **Main window decluttered:** single header (tabs with counts · search · "Profile: X" chip · Settings), add row with Enter-to-add and live summary; removed the in-window Quit/Tray buttons and the duplicated Stop/Start/Remove toolbar (actions live in the detail card + context menu + keys).
+- [x] **Detail card:** single Start-or-Stop button, Remove, Copy name, Open location (EXE), a real *Keep stopped (auto-stop)* toggle, enforcement count, last change; updates live (previously only on selection change, so its status went stale).
+- [x] **Status text:** *Running / Stopped / Not installed / Starting…* with a colored dot; running-but-auto-stop uses the warning color. One formatter for both list code paths (they disagreed: `" (Profile)"` vs `"* "`); `[SUPP e5]` → "auto-stop paused (access denied)".
+- [x] Roomier rows (1-px spacer imagelist sets row height); removed the generic per-row info/app icons; compact "Last change" times; owner-drawn activity log with dim timestamps and red/amber highlighting; Delete key; context menu shows Start *or* Stop and the auto-stop check state; double-click no longer pops a redundant MessageBox.
+- [x] **Profiles dialog:** placed inside the owner monitor's work area (it opened with its title bar above the screen); **Add uses the typed name** (it always created "Profile", forcing a Rename); plain-language labels ("Triggers", "Turn this profile on while any of these programs is running" instead of "WATCH EXEs"); empty-state guidance; compact add/remove rows instead of three stacked full-width buttons.
+- [x] **Preferences:** grouped (Monitoring / Window), plain labels + a dim hint per field. Values and config keys unchanged (still ms).
+- [x] Hotkeys dialog corrected (listed Ctrl+Shift+D — actual is Ctrl+D; omitted Ctrl+G).
+
+### Other bugs fixed along the way
+
+- "Open file location" passed the exe *name* instead of its path, so it always showed "not a full path".
+- `add_item` dereferenced a deleted `Item` if registration failed.
+- Log lines written during config load (e.g. "Monitoring restored …") were silently dropped; they are now buffered and shown.
+- Owner-data column autosize could collapse the Path column.
+- First-run window size is DPI-scaled; detail card can't overlap itself in a short window; widths saved for the old 40-px checkbox column are widened for the new "Auto-stop" header.
+
+### Verification and known gaps
+
+- Built clean (`-Wall -Wextra`, no warnings) with MinGW-w64 GCC 13 cross-compiler; CI (MSYS2 UCRT64) uses the same Makefile.
+- Exercised under **Wine** (light, dark, 96 and 144 DPI, Profiles/Preferences flows, notification timing). Screenshots in `docs/screenshots/` (Wine renders without a title bar and without the icon fonts, so buttons show text labels there).
+- **Not yet verified on real Windows 10/11** — worth a quick check of: icon glyph rendering, the vertical alignment of row checkboxes with the taller rows, dark-mode list header/scrollbars (Wine doesn't implement those themes), and `NotifyServiceStatusChangeW` on a service that is deleted while monitored.
 
 ## Already fixed since the last review (verified in `src/`)
 

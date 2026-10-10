@@ -32,14 +32,16 @@ Some background services and helper executables start themselves repeatedly — 
 - **Start Items**: files, apps, shortcuts, folders, or URLs to shell-open when the profile activates; processes the app launched are closed again when the profile deactivates.
 
 **Interface**
-- Two tabs — **Services** and **Executables** — each a sortable, column-persistent list (Auto-Stop, Name, Status, Path, Last Update).
-- Per-tab **search/filter** (debounced).
-- **Detail panel** showing the selected item's name, live status, Auto-Stop state, and (for services) description, with quick actions.
-- **Activity log** pane recording status changes and enforcement actions.
+- Windows 11-style (Fluent) look in light and dark mode: flat rounded controls, icon glyphs (Segoe Fluent Icons / Segoe MDL2 Assets), accent-colored primary actions.
+- One header row: **Services** / **Executables** tabs with item counts, a search box, the active **Profile** (click to manage profiles) and a **Settings** menu.
+- Add row: type a name and press **Enter** (or click **Add**); **Browse…** on the Executables tab. A live summary shows how many items are running / set to auto-stop.
+- Sortable, column-persistent lists (Auto-stop, Name, Status, Path, Last change). Status reads *Running*, *Stopped*, *Not installed*, *Starting…* with a colored dot; a running item that's set to auto-stop is highlighted.
+- **Detail card** for the selected item: live status, a **Keep stopped (auto-stop)** toggle, how many times it was stopped automatically, the service description, and Start/Stop, Remove, Copy name and Open location actions.
+- **Activity log** with timestamps and highlighted errors / auto-stop events; Clear and Hide buttons.
 - **System tray** support with minimize-to-tray and close-to-tray.
-- **Dark mode** (immersive dark title bar; Mica backdrop on Windows 11 where available).
-- **Per-monitor DPI** awareness for crisp scaling across mixed-DPI displays.
-- Window placement, panel sizes, column widths/order, active tab, and theme are all persisted.
+- **Per-monitor DPI** awareness; window placement, panel sizes, column widths/order, active tab and theme are persisted.
+
+![Main window](docs/screenshots/after-main-light.png)
 
 ---
 
@@ -57,10 +59,10 @@ Some background services and helper executables start themselves repeatedly — 
 3. Tick **Auto-Stop** on the items you want kept stopped.
 4. (Optional) Open **Profiles** to define watched programs, per-profile item sets, and Start Items.
 5. Tune timing in **Preferences** (all values in milliseconds):
-   - **UI Refresh** — how often the list repaints.
-   - **Monitor Interval** — how often statuses are polled / enforcement runs (default `1000`, min `200`).
-   - **Autostop Cooldown** — minimum gap between repeated stop attempts on the same item (default `15000`).
-   - **Stop Wait** — how long to wait for a stop/terminate to complete (default `10000`).
+   - **Check every** — how often statuses are polled / enforcement runs (default `1000`, min `200`). Services are additionally watched with Windows service notifications, so a service that restarts is stopped again immediately rather than on the next poll.
+   - **Re-stop cooldown** — minimum gap between repeated stop attempts on the same item (default `15000`).
+   - **Stop/start timeout** — how long to wait for a stop/terminate to complete (default `10000`).
+   - **Refresh UI every** — fallback repaint interval for the window.
 
 Settings and your item/profile lists are saved to **`windows_service_monitor.cfg`** next to the executable.
 
@@ -76,6 +78,11 @@ Settings and your item/profile lists are saved to **`windows_service_monitor.cfg
 | `Ctrl+D` | Toggle dark mode |
 | `Ctrl+G` | Toggle the activity log pane |
 | `F5`     | Refresh the view |
+| `Enter`  | Add the item typed in the add box |
+| `Space`  | Toggle auto-stop for the selected row |
+| `Delete` | Remove the selected row |
+| `Ctrl+C` | Copy the selected item's name |
+| `Esc`    | Clear the search box |
 
 ---
 
@@ -101,6 +108,12 @@ make clean    # remove build output
 ```
 
 The build is fully static (`-static`), so the resulting `.exe` has no external runtime dependencies.
+
+Cross-compiling from Linux also works (e.g. Ubuntu's `g++-mingw-w64-x86-64`):
+
+```bash
+make CXX=x86_64-w64-mingw32-g++-posix WINDRES=x86_64-w64-mingw32-windres
+```
 
 ---
 
@@ -128,7 +141,7 @@ Makefile           Build
 
 ### How it works (brief)
 
-- A **monitor thread** wakes on the monitor interval, takes a single process snapshot per tick (skipped entirely when there's nothing to watch), queries service states, decides which Auto-Stop items need enforcing, and posts UI updates.
+- A **monitor thread** wakes on the monitor interval, takes a single process snapshot per tick (skipped entirely when there's nothing to watch), queries service states, decides which Auto-Stop items need enforcing, and posts UI updates. It also registers for service status-change notifications (`NotifyServiceStatusChangeW`) and waits alertably, so service changes wake it immediately.
 - An **action thread** performs the actual start/stop/terminate work off the UI thread, so the interface stays responsive.
 - The **UI** is event-driven: only rows whose status actually changed are repainted.
 - Configuration saves are **atomic** (temp file → fsync → rename) and carry a version marker.

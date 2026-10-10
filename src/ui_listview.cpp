@@ -15,9 +15,9 @@ void lv_set_columns(HWND lv, const wchar_t* col0, const wchar_t* col1, const wch
     LVCOLUMNW c{};
     c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
 
-    c.fmt = LVCFMT_CENTER;
+    c.fmt = LVCFMT_LEFT;
     c.pszText = (LPWSTR)col0;
-    c.cx = S(40);
+    c.cx = S(84);
     ListView_InsertColumn(lv, 0, &c);
 
     c.fmt = LVCFMT_LEFT;
@@ -38,7 +38,7 @@ void lv_set_columns(HWND lv, const wchar_t* col0, const wchar_t* col1, const wch
     ListView_InsertColumn(lv, 4, &c);
 
     ListView_SetExtendedListViewStyle(lv,
-        LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
+        LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP | LVS_EX_LABELTIP);
 }
 
 void lv_set_columns(HWND lv, const wchar_t* col0, const wchar_t* col1, const wchar_t* col2, const wchar_t* col3) {
@@ -51,9 +51,9 @@ void lv_set_columns(HWND lv, const wchar_t* col0, const wchar_t* col1, const wch
     LVCOLUMNW c{};
     c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
 
-    c.fmt = LVCFMT_CENTER;
+    c.fmt = LVCFMT_LEFT;
     c.pszText = (LPWSTR)col0;
-    c.cx = S(40);
+    c.cx = S(84);
     ListView_InsertColumn(lv, 0, &c);
 
     c.fmt = LVCFMT_LEFT;
@@ -70,7 +70,7 @@ void lv_set_columns(HWND lv, const wchar_t* col0, const wchar_t* col1, const wch
     ListView_InsertColumn(lv, 3, &c);
 
     ListView_SetExtendedListViewStyle(lv,
-        LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
+        LVS_EX_FULLROWSELECT | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP | LVS_EX_LABELTIP);
 }
 
 void lv_scale_columns(HWND lv, UINT old_dpi, UINT new_dpi) {
@@ -120,8 +120,15 @@ void lv_autosize_status_last(App& self, ItemKind kind) {
 
     HWND hdr = ListView_GetHeader(lv);
     int cols = hdr ? Header_GetItemCount(hdr) : 5;
-    for (int i = 2; i < cols; i++)
+    UINT dpi = self.dpi ? self.dpi : get_dpi_for_hwnd(lv);
+    for (int i = 2; i < cols; i++) {
         ListView_SetColumnWidth(lv, i, LVSCW_AUTOSIZE_USEHEADER);
+        // Owner-data autosize only measures what's been painted so far and can
+        // collapse a column (e.g. Path when no row has a path yet). Keep a floor.
+        const bool is_path = (kind == ItemKind::Exe && i == 3);
+        int floor_w = dpi_scale(dpi, is_path ? 200 : 110);
+        if (ListView_GetColumnWidth(lv, i) < floor_w) ListView_SetColumnWidth(lv, i, floor_w);
+    }
 }
 
 void lv_apply_name_fill(App& self, ItemKind kind) {
@@ -147,37 +154,55 @@ void lv_apply_name_fill(App& self, ItemKind kind) {
     ListView_SetColumnWidth(lv, 1, avail);
 }
 
+// Human-readable status cell text. Single source of truth for both list code
+// paths (they used to disagree: one appended " (Profile)", the other prefixed
+// "* "), and it replaces the cryptic "[SUPP e5]" suffix.
+void ui_format_status(App& self, ItemKind kind, const Item* it, const wchar_t* status_raw, wchar_t* out, size_t cch) {
+    if (!out || !cch) return;
+    const wchar_t* raw = (status_raw && status_raw[0]) ? status_raw : L"unknown";
+    const wchar_t* label;
+    switch (status_kind_of(raw)) {
+    case 1: label = L"Running"; break;
+    case 2: label = L"Stopped"; break;
+    case 4: label = L"Not installed"; break;
+    case 3:
+        label = (_wcsicmp(raw, L"starting") == 0) ? L"Starting…" :
+                (_wcsicmp(raw, L"stopping") == 0) ? L"Stopping…" :
+                (_wcsicmp(raw, L"pausing") == 0)  ? L"Pausing…"  : L"Resuming…";
+        break;
+    default:
+        label = (_wcsicmp(raw, L"paused") == 0) ? L"Paused" : L"Unknown";
+        break;
+    }
+    // U+25CF BLACK CIRCLE: rendered in the status color by custom draw.
+    StringCchPrintfW(out, cch, L"●  %s", label);
+
+    if (!it) return;
+    if (kind == ItemKind::Exe &&
+        self.prof.started_exes.find(it->name) != self.prof.started_exes.end()) {
+        StringCchCatW(out, cch, L" · started by profile");
+    }
+    if (kind == ItemKind::Svc && it->svc_stop_suppress_until_ms &&
+        now_mono_ms() < it->svc_stop_suppress_until_ms) {
+        wchar_t eb[64];
+        if (it->svc_last_stop_err == ERROR_ACCESS_DENIED)
+            StringCchCopyW(eb, 64, L" · auto-stop paused (access denied)");
+        else if (it->svc_last_stop_err)
+            StringCchPrintfW(eb, 64, L" · auto-stop paused (error %lu)", (unsigned long)it->svc_last_stop_err);
+        else
+            StringCchCopyW(eb, 64, L" · auto-stop paused");
+        StringCchCatW(out, cch, eb);
+    }
+}
+
 bool lv_set_row_with(App& self, HWND lv, Item* it, const wchar_t* status_raw, time_t wall_ts) {
     if (!lv || !it || it->name.empty()) return false;
 
     int idx = lv_find_item_by_uid(lv, it->uid);
     if (idx < 0) idx = lv_find_item_by_name(lv, it->name.c_str());
 
-    // Build status display without heap allocations
     wchar_t status_disp[kStatusDispBuf];
-    status_disp[0] = 0;
-    StringCchCopyW(status_disp, kStatusDispBuf, (status_raw && status_raw[0]) ? status_raw : L"unknown");
-    if (lv == self.lv_exe) {
-        // Indicator: EXEs that were started automatically due to an active profile.
-        if (self.prof.started_exes.find(it->name) != self.prof.started_exes.end()) {
-            StringCchCatW(status_disp, kStatusDispBuf, L" (Profile)");
-        }
-    }
-
-    // Indicator: services with AUTO-STOP suppression due to repeated stop errors.
-    if (lv == self.lv_svc) {
-        uint64_t now_ms = now_mono_ms();
-        if (it->svc_stop_suppress_until_ms && now_ms < it->svc_stop_suppress_until_ms) {
-            // Keep this compact and stable (no countdown) to avoid churn.
-            StringCchCatW(status_disp, kStatusDispBuf, L" [SUPP");
-            if (it->svc_last_stop_err) {
-                wchar_t eb[32];
-                StringCchPrintfW(eb, 32, L" e%lu", (unsigned long)it->svc_last_stop_err);
-                StringCchCatW(status_disp, kStatusDispBuf, eb);
-            }
-            StringCchCatW(status_disp, kStatusDispBuf, L"]");
-        }
-    }
+    ui_format_status(self, (lv == self.lv_exe) ? ItemKind::Exe : ItemKind::Svc, it, status_raw, status_disp, kStatusDispBuf);
 
     bool inserted = false;
 
@@ -196,7 +221,7 @@ bool lv_set_row_with(App& self, HWND lv, Item* it, const wchar_t* status_raw, ti
         // Seed UI caches so subsequent updates can be cheap.
         StringCchCopyW(it->ui_cache_status_disp, kStatusDispBuf, status_disp);
         if (it->ui_last_update_wall != wall_ts) {
-            fmt_time_local(it->ui_cache_last_text, 64, wall_ts);
+            fmt_time_short(it->ui_cache_last_text, 64, wall_ts);
             it->ui_last_update_wall = wall_ts;
         }
 
@@ -222,7 +247,7 @@ bool lv_set_row_with(App& self, HWND lv, Item* it, const wchar_t* status_raw, ti
             StringCchCopyW(it->ui_cache_status_disp, kStatusDispBuf, status_disp);
         }
         if (it->ui_last_update_wall != wall_ts) {
-            fmt_time_local(it->ui_cache_last_text, 64, wall_ts);
+            fmt_time_short(it->ui_cache_last_text, 64, wall_ts);
             it->ui_last_update_wall = wall_ts;
         }
 
@@ -267,22 +292,12 @@ bool lv_update_row_existing_with(App& self, HWND lv, ItemKind kind, Item* it, co
     if (out_row_idx) *out_row_idx = idx;
 
     // Build / update cached display strings only when needed.
-    // (Status text can change due to status_raw or the profile indicator prefix.)
     wchar_t status_disp[kStatusDispBuf];
-    status_disp[0] = 0;
-    StringCchCopyW(status_disp, kStatusDispBuf, (status_raw && status_raw[0]) ? status_raw : L"unknown");
-    if (lv == self.lv_exe) {
-        if (self.prof.started_exes.find(it->name) != self.prof.started_exes.end()) {
-            // Prefix indicator
-            wchar_t tmp[kStatusDispBuf];
-            StringCchCopyW(tmp, kStatusDispBuf, status_disp);
-            StringCchPrintfW(status_disp, kStatusDispBuf, L"* %s", tmp);
-        }
-    }
+    ui_format_status(self, kind, it, status_raw, status_disp, kStatusDispBuf);
 
     // Only re-format the timestamp string if the wall time changed.
     if (it->ui_last_update_wall != wall_ts) {
-        fmt_time_local(it->ui_cache_last_text, 64, wall_ts);
+        fmt_time_short(it->ui_cache_last_text, 64, wall_ts);
     }
 
     // Keep cached status display for quick comparisons and potential future owner-data support.
@@ -290,7 +305,7 @@ bool lv_update_row_existing_with(App& self, HWND lv, ItemKind kind, Item* it, co
 
     // Avoid churn if nothing changed
     if (it->ui_applied_gen == it->status_gen &&
-        wcscmp(it->ui_last_status, it->ui_cache_status_disp) == 0 &&
+        wcsncmp(it->ui_last_status, it->ui_cache_status_disp, 31) == 0 &&
         it->ui_last_update_wall == wall_ts) {
         return false;
     }
@@ -416,8 +431,64 @@ void ui_apply_status_updates(App& self, ItemKind kind) {
         ListView_RedrawItems(lv, row_first, row_last);
         UpdateWindow(lv);
     }
+
+    // Keep the detail panel live: previously it only refreshed on selection
+    // change, so its status line went stale while the list updated.
+    if (self.detail_uid && k == self.active_tab) {
+        for (const auto& d : deltas) {
+            if (d.it && d.it->uid == self.detail_uid) { update_detail_panel(self, kind, d.it); break; }
+        }
+    }
 }
 
+
+// Owner-drawn activity line: dim "[hh:mm:ss]" timestamp, message colored by
+// a light heuristic (errors red, auto-stop enforcement in the warning color).
+void activity_draw_item(App& self, const DRAWITEMSTRUCT* dis) {
+    if (!dis || (int)dis->itemID < 0) return;
+    const auto& t = self.theme;
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    const bool sel = (dis->itemState & ODS_SELECTED) != 0;
+
+    SetDCBrushColor(hdc, sel ? (t.dark_mode ? RGB(65, 65, 65) : RGB(229, 241, 251)) : t.col_edit_bg);
+    FillRect(hdc, &rc, (HBRUSH)GetStockObject(DC_BRUSH));
+
+    int len = (int)SendMessageW(dis->hwndItem, LB_GETTEXTLEN, dis->itemID, 0);
+    if (len <= 0) return;
+    std::wstring line((size_t)len + 1, L'\0');
+    SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)line.data());
+    line.resize((size_t)len);
+
+    std::wstring ts, msg = line;
+    if (line.size() > 2 && line[0] == L'[') {
+        size_t close = line.find(L"] ");
+        if (close != std::wstring::npos) { ts = line.substr(1, close - 1); msg = line.substr(close + 2); }
+    }
+
+    COLORREF mc = t.col_text;
+    if (StrStrIW(msg.c_str(), L"error") || StrStrIW(msg.c_str(), L"failed") || StrStrIW(msg.c_str(), L"refused"))
+        mc = t.col_err;
+    else if (StrStrIW(msg.c_str(), L"AUTO-STOP"))
+        mc = t.col_warn;
+
+    const UINT dpi = self.dpi ? self.dpi : 96;
+    HFONT f = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
+    HGDIOBJ oldf = f ? SelectObject(hdc, f) : NULL;
+    SetBkMode(hdc, TRANSPARENT);
+    RECT tr = rc;
+    tr.left += dpi_scale(dpi, 8);
+    if (!ts.empty()) {
+        SetTextColor(hdc, t.col_text_dim);
+        DrawTextW(hdc, ts.c_str(), (int)ts.size(), &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        SIZE sz{};
+        GetTextExtentPoint32W(hdc, L"00:00:00", 8, &sz);
+        tr.left += sz.cx + dpi_scale(dpi, 12);
+    }
+    SetTextColor(hdc, mc);
+    DrawTextW(hdc, msg.c_str(), (int)msg.size(), &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    if (oldf) SelectObject(hdc, oldf);
+}
 
 void log_linef(App& self, const wchar_t* fmt, ...) {
     wchar_t msg[1024];
@@ -433,6 +504,12 @@ void log_linef(App& self, const wchar_t* fmt, ...) {
 
     wchar_t line[1200];
     StringCchPrintfW(line, 1200, L"[%s] %s", ts, msg);
+    if (!self.activity) {
+        // Before the window exists (config load): keep the line so it is shown
+        // once the log is created instead of silently dropping it.
+        if (self.deferred_logs.size() < MAX_LOG_LINES) self.deferred_logs.emplace_back(line);
+        return;
+    }
     activity_append(self, self.activity, line);
 }
 
@@ -653,31 +730,6 @@ void toggle_autostop_selected(App& self, ItemKind kind) {
         // that row instead of the whole control.
         ListView_RedrawItems(lv, row, row);
     }
-}
-
-void show_item_details(App& self, ItemKind kind) {
-    Item* it = lv_get_selected_item_ptr(self, kind);
-    if (!it) return;
-
-    wchar_t last[64];
-    fmt_time_local(last, 64, it->last_update_wall);
-
-    wchar_t buf[1200];
-    StringCchPrintfW(buf, 1200,
-        L"Name: %s\n"
-        L"Type: %s\n"
-        L"Status: %s\n"
-        L"Last update: %s\n"
-        L"Auto-stop: %s\n"
-        L"Auto-stop count: %d",
-        it->name.c_str(),
-        (kind == ItemKind::Svc) ? L"Service" : L"EXE",
-        it->last_status,
-        last,
-        it->auto_stop ? L"Enabled" : L"Disabled",
-        it->autostop_count);
-
-    msgbox_info(self.hwnd, L"Details", buf);
 }
 
 void open_file_location_best_effort(App& self, const wchar_t* exeOrPath) {

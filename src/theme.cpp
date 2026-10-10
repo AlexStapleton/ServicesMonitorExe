@@ -118,8 +118,8 @@ static LRESULT theme_customdraw_listview(App& self, NMLVCUSTOMDRAW* lcd) {
 
         // Dark mode: custom selection/hot background
         if (self.theme.dark_mode) {
-            if (selected) bk = DK_BORDER;
-            else if (hot) bk = DK_PRESSED;
+            if (selected) bk = RGB(65, 65, 65);
+            else if (hot) bk = RGB(50, 50, 50);
         }
 
         // Colored status text for subitem 2 (Status column) — both modes
@@ -138,15 +138,7 @@ static LRESULT theme_customdraw_listview(App& self, NMLVCUSTOMDRAW* lcd) {
                     if (itp) {
                         // Use pre-classified status_kind (set whenever last_status
                         // changes) instead of _wcsicmp in this per-cell hot path.
-                        if (itp->status_kind == 1) {           // running
-                            text = self.theme.dark_mode ? RGB(80, 200, 80) : RGB(0, 140, 0);
-                        } else if (itp->status_kind == 2) {    // stopped
-                            if (itp->auto_stop) {
-                                text = self.theme.dark_mode ? RGB(200, 80, 80) : RGB(180, 40, 40);
-                            } else {
-                                text = self.theme.dark_mode ? RGB(140, 140, 140) : RGB(128, 128, 128);
-                            }
-                        }
+                        text = theme_status_color(self, itp->status_kind, itp->auto_stop);
                     }
                 }
             }
@@ -160,10 +152,8 @@ static LRESULT theme_customdraw_listview(App& self, NMLVCUSTOMDRAW* lcd) {
             HDC hdc = lcd->nmcd.hdc;
             if (hdc) {
                 RECT rc = lcd->nmcd.rc;
-                HBRUSH br = selected ? self.theme.br_border
-                          : hot      ? self.theme.br_pressed
-                          :            self.theme.br_edit;
-                FillRect(hdc, &rc, br);
+                SetDCBrushColor(hdc, bk);
+                FillRect(hdc, &rc, (HBRUSH)GetStockObject(DC_BRUSH));
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, text);
             }
@@ -177,66 +167,253 @@ static LRESULT theme_customdraw_listview(App& self, NMLVCUSTOMDRAW* lcd) {
 }
 
 static void theme_release_brushes(App& self) {
-    // Light-mode pill objects are always owned (not system brushes)
-    if (self.theme.br_lt_accent) { DeleteObject(self.theme.br_lt_accent); self.theme.br_lt_accent = NULL; }
-    if (self.theme.pen_lt_accent) { DeleteObject(self.theme.pen_lt_accent); self.theme.pen_lt_accent = NULL; }
-    if (self.theme.pen_lt_border) { DeleteObject(self.theme.pen_lt_border); self.theme.pen_lt_border = NULL; }
-
-    if (!self.theme.owns_brushes) return;
-    if (self.theme.br_bg) { DeleteObject(self.theme.br_bg); self.theme.br_bg = NULL; }
-    if (self.theme.br_panel) { DeleteObject(self.theme.br_panel); self.theme.br_panel = NULL; }
-    if (self.theme.br_edit) { DeleteObject(self.theme.br_edit); self.theme.br_edit = NULL; }
-    if (self.theme.br_btn) { DeleteObject(self.theme.br_btn); self.theme.br_btn = NULL; }
-    if (self.theme.br_pressed) { DeleteObject(self.theme.br_pressed); self.theme.br_pressed = NULL; }
-    if (self.theme.br_border) { DeleteObject(self.theme.br_border); self.theme.br_border = NULL; }
-    if (self.theme.br_accent) { DeleteObject(self.theme.br_accent); self.theme.br_accent = NULL; }
-    if (self.theme.pen_border) { DeleteObject(self.theme.pen_border); self.theme.pen_border = NULL; }
-    if (self.theme.pen_accent) { DeleteObject(self.theme.pen_accent); self.theme.pen_accent = NULL; }
-    if (self.theme.pen_separator) { DeleteObject(self.theme.pen_separator); self.theme.pen_separator = NULL; }
+    HGDIOBJ* objs[] = {
+        (HGDIOBJ*)&self.theme.br_bg, (HGDIOBJ*)&self.theme.br_panel, (HGDIOBJ*)&self.theme.br_edit,
+        (HGDIOBJ*)&self.theme.br_btn, (HGDIOBJ*)&self.theme.br_pressed, (HGDIOBJ*)&self.theme.br_border,
+        (HGDIOBJ*)&self.theme.br_accent, (HGDIOBJ*)&self.theme.pen_border, (HGDIOBJ*)&self.theme.pen_accent,
+        (HGDIOBJ*)&self.theme.pen_separator, (HGDIOBJ*)&self.theme.br_card,
+    };
+    if (self.theme.owns_brushes) {
+        for (HGDIOBJ* o : objs) { if (*o) DeleteObject(*o); }
+    }
+    for (HGDIOBJ* o : objs) *o = NULL;
     self.theme.owns_brushes = false;
 }
 
+// Palette loosely follows the Windows 11 (Fluent) light/dark resources so the
+// app sits naturally next to Settings/Explorer. All brushes are owned in both
+// modes now (light mode used to borrow 3D system colors, which is where the
+// Windows-95 look came from).
 static void theme_update_resources(App& self) {
     theme_release_brushes(self);
+    auto& t = self.theme;
 
-    if (self.theme.dark_mode) {
-        self.theme.col_bg = RGB(32, 32, 32);
-        self.theme.col_panel = RGB(38, 38, 38);
-        self.theme.col_edit_bg = RGB(45, 45, 45);
-        self.theme.col_text = RGB(235, 235, 235);
-        self.theme.col_text_dim = RGB(180, 180, 180);
-
-        self.theme.br_bg = CreateSolidBrush(self.theme.col_bg);
-        self.theme.br_panel = CreateSolidBrush(self.theme.col_panel);
-        self.theme.br_edit = CreateSolidBrush(self.theme.col_edit_bg);
-        self.theme.br_btn = CreateSolidBrush(self.theme.col_panel);
-
-        // Cached hot-path GDI objects
-        self.theme.br_pressed = CreateSolidBrush(DK_PRESSED);
-        self.theme.br_border = CreateSolidBrush(DK_BORDER);
-        self.theme.br_accent = CreateSolidBrush(DK_ACCENT);
-        self.theme.pen_border = CreatePen(PS_SOLID, 1, DK_BORDER);
-        self.theme.pen_accent = CreatePen(PS_SOLID, 1, DK_ACCENT);
-        self.theme.pen_separator = CreatePen(PS_SOLID, 1, DK_SEPARATOR);
-
-        self.theme.owns_brushes = true;
+    if (t.dark_mode) {
+        t.col_bg           = RGB(32, 32, 32);
+        t.col_panel        = RGB(32, 32, 32);
+        t.col_card         = RGB(43, 43, 43);
+        t.col_edit_bg      = RGB(39, 39, 39);
+        t.col_text         = RGB(240, 240, 240);
+        t.col_text_dim     = RGB(166, 166, 166);
+        t.col_border       = RGB(58, 58, 58);
+        t.col_ctrl         = RGB(45, 45, 45);
+        t.col_ctrl_hot     = RGB(56, 56, 56);
+        t.col_ctrl_pressed = RGB(39, 39, 39);
+        t.col_accent       = RGB(76, 160, 224);
+        t.col_on_accent    = RGB(0, 0, 0);
+        t.col_ok           = RGB(108, 203, 95);
+        t.col_warn         = RGB(252, 185, 0);
+        t.col_err          = RGB(255, 153, 164);
     } else {
-        self.theme.col_bg = GetSysColor(COLOR_BTNFACE);
-        self.theme.col_panel = GetSysColor(COLOR_BTNFACE);
-        self.theme.col_edit_bg = GetSysColor(COLOR_WINDOW);
-        self.theme.col_text = GetSysColor(COLOR_WINDOWTEXT);
-        self.theme.col_text_dim = GetSysColor(COLOR_GRAYTEXT);
+        t.col_bg           = RGB(243, 243, 243);
+        t.col_panel        = RGB(243, 243, 243);
+        t.col_card         = RGB(251, 251, 251);
+        t.col_edit_bg      = RGB(255, 255, 255);
+        t.col_text         = RGB(26, 26, 26);
+        t.col_text_dim     = RGB(96, 96, 96);
+        t.col_border       = RGB(219, 219, 219);
+        t.col_ctrl         = RGB(253, 253, 253);
+        t.col_ctrl_hot     = RGB(245, 245, 245);
+        t.col_ctrl_pressed = RGB(237, 237, 237);
+        t.col_accent       = RGB(0, 95, 184);
+        t.col_on_accent    = RGB(255, 255, 255);
+        t.col_ok           = RGB(15, 123, 15);
+        t.col_warn         = RGB(157, 93, 0);
+        t.col_err          = RGB(196, 43, 28);
+    }
 
-        self.theme.br_bg = GetSysColorBrush(COLOR_BTNFACE);
-        self.theme.br_panel = GetSysColorBrush(COLOR_BTNFACE);
-        self.theme.br_edit = GetSysColorBrush(COLOR_WINDOW);
-        self.theme.br_btn = GetSysColorBrush(COLOR_BTNFACE);
-        self.theme.owns_brushes = false;
+    t.br_bg      = CreateSolidBrush(t.col_bg);
+    t.br_panel   = CreateSolidBrush(t.col_panel);
+    t.br_card    = CreateSolidBrush(t.col_card);
+    t.br_edit    = CreateSolidBrush(t.col_edit_bg);
+    t.br_btn     = CreateSolidBrush(t.col_ctrl);
+    t.br_pressed = CreateSolidBrush(t.col_ctrl_hot);
+    t.br_border  = CreateSolidBrush(t.dark_mode ? RGB(65, 65, 65) : RGB(229, 241, 251));  // list selection
+    t.br_accent  = CreateSolidBrush(t.col_accent);
+    t.pen_border = CreatePen(PS_SOLID, 1, t.col_border);
+    t.pen_accent = CreatePen(PS_SOLID, 1, t.col_accent);
+    t.pen_separator = CreatePen(PS_SOLID, 1, t.col_border);
+    t.owns_brushes = true;
+}
 
-        // Light-mode pill tab cached GDI (always owned, freed independently of owns_brushes)
-        self.theme.br_lt_accent = CreateSolidBrush(LT_ACCENT);
-        self.theme.pen_lt_accent = CreatePen(PS_SOLID, 1, LT_ACCENT);
-        self.theme.pen_lt_border = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
+// --------------------------------------------------
+// Fonts
+// --------------------------------------------------
+static int CALLBACK font_exists_proc(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM lp) {
+    *reinterpret_cast<bool*>(lp) = true;
+    return 0;
+}
+
+static bool font_family_installed(const wchar_t* face) {
+    HDC hdc = GetDC(NULL);
+    if (!hdc) return false;
+    LOGFONTW lf{};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    StringCchCopyW(lf.lfFaceName, LF_FACESIZE, face);
+    bool found = false;
+    EnumFontFamiliesExW(hdc, &lf, font_exists_proc, (LPARAM)&found, 0);
+    ReleaseDC(NULL, hdc);
+    return found;
+}
+
+// Segoe Fluent Icons (Win11) or Segoe MDL2 Assets (Win10). Resolved once.
+static const wchar_t* icon_font_face() {
+    static int state = -1;  // -1 unknown, 0 none, 1 fluent, 2 mdl2
+    if (state < 0) {
+        if (font_family_installed(L"Segoe Fluent Icons")) state = 1;
+        else if (font_family_installed(L"Segoe MDL2 Assets")) state = 2;
+        else state = 0;
+    }
+    return state == 1 ? L"Segoe Fluent Icons" : state == 2 ? L"Segoe MDL2 Assets" : nullptr;
+}
+
+static void theme_release_fonts(App& self) {
+    for (HFONT* f : { &self.theme.font_title, &self.theme.font_bold, &self.theme.font_icon }) {
+        if (*f) { DeleteObject(*f); *f = NULL; }
+    }
+}
+
+static void theme_build_fonts(App& self, UINT dpi) {
+    theme_release_fonts(self);
+    LOGFONTW base{};
+    if (self.ui_font) GetObjectW(self.ui_font, sizeof(base), &base);
+    else { base.lfHeight = -dpi_scale(dpi, 12); StringCchCopyW(base.lfFaceName, LF_FACESIZE, L"Segoe UI"); }
+    base.lfQuality = CLEARTYPE_QUALITY;
+
+    LOGFONTW lf = base;
+    lf.lfWeight = FW_SEMIBOLD;
+    self.theme.font_bold = CreateFontIndirectW(&lf);
+
+    lf.lfHeight = MulDiv(base.lfHeight, 4, 3);  // ~1.33x the body size
+    self.theme.font_title = CreateFontIndirectW(&lf);
+
+    if (const wchar_t* face = icon_font_face()) {
+        LOGFONTW li{};
+        li.lfHeight = -dpi_scale(dpi, 14);
+        li.lfWeight = FW_NORMAL;
+        li.lfCharSet = DEFAULT_CHARSET;
+        li.lfQuality = CLEARTYPE_QUALITY;
+        StringCchCopyW(li.lfFaceName, LF_FACESIZE, face);
+        self.theme.font_icon = CreateFontIndirectW(&li);
+    }
+}
+
+// --------------------------------------------------
+// Drawing primitives
+// --------------------------------------------------
+void theme_fill_round(HDC hdc, const RECT& rc, int radius, COLORREF fill, COLORREF border) {
+    HGDIOBJ ob = SelectObject(hdc, GetStockObject(DC_BRUSH));
+    HGDIOBJ op = SelectObject(hdc, GetStockObject(DC_PEN));
+    SetDCBrushColor(hdc, fill);
+    SetDCPenColor(hdc, border);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+}
+
+COLORREF theme_status_color(const App& self, uint8_t status_kind, bool auto_stop) {
+    switch (status_kind) {
+    case 1: return auto_stop ? self.theme.col_warn : self.theme.col_ok;  // running (warn: will be stopped)
+    case 3: return self.theme.col_warn;                                  // transitioning
+    case 2:                                                              // stopped
+    case 4:                                                              // not installed
+    default: return self.theme.col_text_dim;
+    }
+}
+
+void ui_button_style(HWND btn, wchar_t glyph, UINT flags) {
+    if (!btn) return;
+    SetPropW(btn, L"SEM_GLYPH", (HANDLE)(UINT_PTR)glyph);
+    SetPropW(btn, L"SEM_BTNSTYLE", (HANDLE)(UINT_PTR)flags);
+    InvalidateRect(btn, NULL, FALSE);
+}
+
+// Paints every push button in the app (main window and dialogs) via
+// DarkButtonSubclassProc: rounded, flat, hover/pressed states, optional icon
+// glyph and accent fill.
+void theme_paint_button(App& self, HWND btn, HDC hdc) {
+    const auto& t = self.theme;
+    RECT rc{}; GetClientRect(btn, &rc);
+    const UINT dpi = self.dpi ? self.dpi : 96;
+
+    const UINT flags = (UINT)(UINT_PTR)GetPropW(btn, L"SEM_BTNSTYLE");
+    const wchar_t glyph = (wchar_t)(UINT_PTR)GetPropW(btn, L"SEM_GLYPH");
+    const bool hot = GetPropW(btn, L"SEM_HOT") != NULL;
+    const bool disabled = !IsWindowEnabled(btn);
+    const bool pressed = (SendMessageW(btn, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
+    const bool accent = (flags & BTNSTYLE_ACCENT) && !disabled;
+    const bool subtle = (flags & BTNSTYLE_SUBTLE) != 0;
+
+    // Parent background first (rounded corners leave the corners visible).
+    HWND parent = GetParent(btn);
+    HBRUSH parent_br = (HBRUSH)SendMessageW(parent, WM_CTLCOLORBTN, (WPARAM)hdc, (LPARAM)btn);
+    FillRect(hdc, &rc, parent_br ? parent_br : t.br_bg);
+
+    COLORREF fill, border, text;
+    if (accent) {
+        fill = t.col_accent;
+        if (pressed)  fill = RGB(GetRValue(fill) * 85 / 100, GetGValue(fill) * 85 / 100, GetBValue(fill) * 85 / 100);
+        else if (hot) fill = RGB(GetRValue(fill) * 92 / 100, GetGValue(fill) * 92 / 100, GetBValue(fill) * 92 / 100);
+        border = fill;
+        text = t.col_on_accent;
+    } else if (disabled) {
+        // Clearly inert: blend into the background, faded text.
+        fill = t.col_bg;
+        border = t.col_border;
+        text = t.dark_mode ? RGB(110, 110, 110) : RGB(165, 165, 165);
+    } else {
+        fill = pressed ? t.col_ctrl_pressed : hot ? t.col_ctrl_hot : t.col_ctrl;
+        border = t.col_border;
+        text = t.col_text;
+    }
+
+    if (!subtle || hot || pressed) {
+        theme_fill_round(hdc, rc, dpi_scale(dpi, 4), fill, subtle ? fill : border);
+    }
+
+    wchar_t txt[128]{};
+    GetWindowTextW(btn, txt, 127);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, text);
+
+    const bool have_glyph = glyph && t.font_icon;
+    const bool icon_only = have_glyph && (flags & BTNSTYLE_ICON_ONLY);
+
+    HFONT font = (HFONT)SendMessageW(btn, WM_GETFONT, 0, 0);
+    if (!font) font = self.ui_font;
+
+    SIZE ts{0, 0}, gs{0, 0};
+    const int gap = dpi_scale(dpi, 8);
+    HGDIOBJ oldf = SelectObject(hdc, font);
+    if (!icon_only && txt[0]) GetTextExtentPoint32W(hdc, txt, (int)wcslen(txt), &ts);
+    if (have_glyph) {
+        SelectObject(hdc, t.font_icon);
+        GetTextExtentPoint32W(hdc, &glyph, 1, &gs);
+    }
+    int total = (int)gs.cx + ((have_glyph && ts.cx) ? gap : 0) + (int)ts.cx;
+    int x = rc.left + std::max<int>(dpi_scale(dpi, 6), ((rc.right - rc.left) - total) / 2);
+
+    if (have_glyph) {
+        RECT gr{ x, rc.top, x + gs.cx, rc.bottom };
+        DrawTextW(hdc, &glyph, 1, &gr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_NOCLIP);
+        x += gs.cx + (ts.cx ? gap : 0);
+    }
+    if (!icon_only) {
+        SelectObject(hdc, font);
+        RECT tr{ x, rc.top, rc.right - dpi_scale(dpi, 4), rc.bottom };
+        DrawTextW(hdc, txt, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | (have_glyph ? 0 : 0));
+    }
+    SelectObject(hdc, oldf);
+
+    if (GetFocus() == btn && !disabled && (SendMessageW(btn, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) == 0) {
+        RECT fr = rc;
+        InflateRect(&fr, -dpi_scale(dpi, 2), -dpi_scale(dpi, 2));
+        HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        HGDIOBJ op = SelectObject(hdc, GetStockObject(DC_PEN));
+        SetDCPenColor(hdc, t.col_text);
+        RoundRect(hdc, fr.left, fr.top, fr.right, fr.bottom, dpi_scale(dpi, 6), dpi_scale(dpi, 6));
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
     }
 }
 
@@ -322,7 +499,9 @@ void theme_apply_to_control(App& self, HWND child) {
         const bool is_pill = (ctl_id == IDC_TOOLBAR_TAB_SVC || ctl_id == IDC_TOOLBAR_TAB_EXE
                            || (ctl_id >= IDC_PROF_TAB_ACTIVATION && ctl_id <= IDC_PROF_TAB_EXE));
         if (is_pill) {
-            // Just apply theme hint + invalidate; don't change style or subclass.
+            // Keep BS_OWNERDRAW (drawn via the parent's WM_DRAWITEM); the
+            // subclass only adds hover tracking for owner-draw buttons.
+            SetWindowSubclass(child, DarkButtonSubclassProc, 1, (DWORD_PTR)&self);
             try_set_explorer_theme_mode(child, self.theme.dark_mode);
             InvalidateRect(child, NULL, FALSE);
             return;
@@ -394,9 +573,9 @@ void theme_apply_to_control(App& self, HWND child) {
 // --------------------------------------------------
 
 void theme_release_resources(App& self) {
-    // Currently we only own brushes for custom dark/light colors.
     // Keep this separate from theme_update_resources() so WM_DESTROY can cleanly release them.
     theme_release_brushes(self);
+    theme_release_fonts(self);
 }
 
 HBRUSH theme_handle_ctlcolor(App& self, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -406,6 +585,21 @@ HBRUSH theme_handle_ctlcolor(App& self, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     COLORREF text = self.theme.col_text;
     if (ctl && !IsWindowEnabled(ctl)) text = self.theme.col_text_dim;
+
+    // Detail "card" children sit on the card surface, with a few accent colors.
+    if (ctl && self.detail_panel && GetParent(ctl) == self.detail_panel) {
+        if (ctl == self.detail_status_lbl) text = self.detail_status_col ? self.detail_status_col : self.theme.col_text;
+        else if (ctl == self.detail_kind || ctl == self.detail_meta) text = self.theme.col_text_dim;
+        SetTextColor(hdc, text);
+        SetBkMode(hdc, (msg == WM_CTLCOLOREDIT) ? OPAQUE : TRANSPARENT);
+        SetBkColor(hdc, self.theme.col_card);
+        return self.theme.br_card;
+    }
+    if (ctl && (ctl == self.svc_empty || ctl == self.exe_empty)) {
+        SetTextColor(hdc, self.theme.col_text_dim);
+        SetBkMode(hdc, TRANSPARENT);
+        return self.theme.br_edit;
+    }
     SetTextColor(hdc, text);
 
     switch (msg) {
@@ -435,115 +629,65 @@ bool theme_draw_owner_button(App& self, const DRAWITEMSTRUCT* dis) {
 
     int ctlId = (int)dis->CtlID;
 
-    // Pill-style tab buttons (draw in both light and dark mode)
+    // Tab-style buttons (main window header)
     if (ctlId == IDC_TOOLBAR_TAB_SVC || ctlId == IDC_TOOLBAR_TAB_EXE) {
         bool is_selected = (ctlId == IDC_TOOLBAR_TAB_SVC && self.active_tab == 0) ||
                            (ctlId == IDC_TOOLBAR_TAB_EXE && self.active_tab == 1);
         return theme_draw_pill(self, dis, is_selected);
     }
 
-    // Regular owner-draw buttons (both light and dark mode)
-    HDC hdc = dis->hDC;
-    RECT rc = dis->rcItem;
-
-    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
-    const bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
-    const bool hot      = (dis->itemState & ODS_HOTLIGHT) != 0;
-
-    if (self.theme.dark_mode) {
-        // Dark mode — use cached brushes/pens
-        FillRect(hdc, &rc, pressed ? self.theme.br_pressed : self.theme.br_panel);
-        HGDIOBJ oldp = SelectObject(hdc, self.theme.pen_border);
-        HGDIOBJ oldb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
-        SelectObject(hdc, oldb);
-        SelectObject(hdc, oldp);
-    } else {
-        // Light mode — system colors
-        COLORREF bgCol = pressed ? GetSysColor(COLOR_BTNHIGHLIGHT)
-                       : hot     ? GetSysColor(COLOR_BTNFACE)
-                       :           GetSysColor(COLOR_BTNFACE);
-        HBRUSH bgBr = CreateSolidBrush(bgCol);
-        FillRect(hdc, &rc, bgBr);
-        DeleteObject(bgBr);
-        // Standard 3D-style border
-        DrawEdge(hdc, &rc, pressed ? EDGE_SUNKEN : EDGE_RAISED, BF_RECT);
-    }
-
-    // Text
-    wchar_t txt[256]{0};
-    GetWindowTextW(dis->hwndItem, txt, 255);
-
-    SetBkMode(hdc, TRANSPARENT);
-    if (self.theme.dark_mode) {
-        SetTextColor(hdc, disabled ? self.theme.col_text_dim : self.theme.col_text);
-    } else {
-        SetTextColor(hdc, disabled ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_BTNTEXT));
-    }
-
-    HFONT hfont = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
-    HGDIOBJ oldf = NULL;
-    if (hfont) oldf = SelectObject(hdc, hfont);
-
-    RECT tr = rc;
-    if (pressed) { tr.left += 1; tr.top += 1; }
-    DrawTextW(hdc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (oldf) SelectObject(hdc, oldf);
-
-    // Focus rect
-    if ((dis->itemState & ODS_FOCUS) && !disabled) {
-        RECT fr = rc;
-        InflateRect(&fr, -3, -3);
-        DrawFocusRect(hdc, &fr);
-    }
+    // Any other owner-draw button normally gets converted to subclass painting
+    // by theme_apply_to_control; paint identically if one slips through.
+    theme_paint_button(self, dis->hwndItem, dis->hDC);
     return true;
 }
 
+// "Selector bar" tabs (Windows 11 style): plain text, selected tab gets
+// semibold text and a short rounded accent bar underneath; hover gets a
+// subtle rounded fill. Used by the main header and the Profiles dialog.
 bool theme_draw_pill(App& self, const DRAWITEMSTRUCT* dis, bool is_selected) {
     if (!dis) return false;
+    const auto& t = self.theme;
+    const UINT dpi = self.dpi ? self.dpi : 96;
 
     HDC hdc = dis->hDC;
     RECT rc = dis->rcItem;
 
-    // Fill background behind pill (parent bg)
-    FillRect(hdc, &rc, self.theme.br_bg);
+    HWND parent = GetParent(dis->hwndItem);
+    HBRUSH parent_br = (HBRUSH)SendMessageW(parent, WM_CTLCOLORBTN, (WPARAM)hdc, (LPARAM)dis->hwndItem);
+    FillRect(hdc, &rc, parent_br ? parent_br : t.br_bg);
 
-    // Draw pill shape
-    int radius = (rc.bottom - rc.top) / 2;
-    if (radius < 4) radius = 4;
-
-    if (is_selected) {
-        HBRUSH pillBr = self.theme.dark_mode ? self.theme.br_accent : self.theme.br_lt_accent;
-        HPEN pillPen = self.theme.dark_mode ? self.theme.pen_accent : self.theme.pen_lt_accent;
-        HGDIOBJ oldBr = SelectObject(hdc, pillBr);
-        HGDIOBJ oldPen = SelectObject(hdc, pillPen);
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-        SelectObject(hdc, oldBr);
-        SelectObject(hdc, oldPen);
-    } else {
-        HPEN borderPen = self.theme.dark_mode ? self.theme.pen_border : self.theme.pen_lt_border;
-        HGDIOBJ oldPen = SelectObject(hdc, borderPen);
-        HGDIOBJ oldBr = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-        SelectObject(hdc, oldBr);
-        SelectObject(hdc, oldPen);
+    const bool hot = GetPropW(dis->hwndItem, L"SEM_HOT") != NULL;
+    const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    if (hot || pressed) {
+        RECT hr = rc;
+        InflateRect(&hr, 0, -dpi_scale(dpi, 2));
+        theme_fill_round(hdc, hr, dpi_scale(dpi, 4), pressed ? t.col_ctrl_pressed : t.col_ctrl_hot,
+                         pressed ? t.col_ctrl_pressed : t.col_ctrl_hot);
     }
 
-    // Text
     wchar_t txt[64]{0};
     GetWindowTextW(dis->hwndItem, txt, 63);
     SetBkMode(hdc, TRANSPARENT);
-    if (is_selected) {
-        SetTextColor(hdc, RGB(255, 255, 255));
-    } else {
-        SetTextColor(hdc, self.theme.dark_mode ? self.theme.col_text_dim : RGB(80, 80, 80));
-    }
-    HFONT hfont = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
-    HGDIOBJ oldf = NULL;
-    if (hfont) oldf = SelectObject(hdc, hfont);
-    DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(hdc, is_selected ? t.col_text : t.col_text_dim);
+    HFONT f = is_selected && t.font_bold ? t.font_bold : (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
+    HGDIOBJ oldf = f ? SelectObject(hdc, f) : NULL;
+    DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     if (oldf) SelectObject(hdc, oldf);
 
+    if (is_selected) {
+        const int barW = dpi_scale(dpi, 18);
+        const int barH = std::max(2, dpi_scale(dpi, 3));
+        const int cx = (rc.left + rc.right) / 2;
+        RECT bar{ cx - barW / 2, rc.bottom - barH - dpi_scale(dpi, 2), cx + barW / 2, rc.bottom - dpi_scale(dpi, 2) };
+        theme_fill_round(hdc, bar, barH / 2 + 1, t.col_accent, t.col_accent);
+    }
+
+    if ((dis->itemState & ODS_FOCUS) && !(dis->itemState & ODS_NOFOCUSRECT)) {
+        RECT fr = rc;
+        InflateRect(&fr, -dpi_scale(dpi, 1), -dpi_scale(dpi, 1));
+        DrawFocusRect(hdc, &fr);
+    }
     return true;
 }
 
@@ -676,28 +820,20 @@ void theme_compute(App& self) {
             self.ui_font = NULL;
         }
         self.ui_font = create_ui_font_for_dpi(dpi_now);
+        theme_build_fonts(self, dpi_now);
         changed = true;
 
-        // ListView imagelists (DPI dependent) - create here, attach in theme_apply_all_controls()
-        int iconPx = dpi_scale(dpi_now, 16);
-        if (iconPx < 12) iconPx = 12;
+        // ListView "spacer" imagelists (DPI dependent): 1px wide, row-height tall,
+        // no images. The small imagelist height sets the report-view row height,
+        // which is the standard way to get roomier rows without owner-draw. (The
+        // old generic info/app icons on every row added noise, not information.)
+        const int rowPx = dpi_scale(dpi_now, 28);
 
         if (self.il_svc) { ImageList_Destroy(self.il_svc); self.il_svc = NULL; }
         if (self.il_exe) { ImageList_Destroy(self.il_exe); self.il_exe = NULL; }
 
-        self.il_svc = ImageList_Create(iconPx, iconPx, ILC_COLOR32 | ILC_MASK, 4, 4);
-        self.il_exe = ImageList_Create(iconPx, iconPx, ILC_COLOR32 | ILC_MASK, 4, 4);
-
-        if (self.il_svc && self.il_exe) {
-            HICON hSvc = (HICON)LoadImageW(NULL, IDI_INFORMATION, IMAGE_ICON, iconPx, iconPx, LR_SHARED);
-            HICON hExe = (HICON)LoadImageW(NULL, IDI_APPLICATION, IMAGE_ICON, iconPx, iconPx, LR_SHARED);
-
-            if (hSvc) ImageList_AddIcon(self.il_svc, hSvc);
-            if (hExe) ImageList_AddIcon(self.il_svc, hExe);
-
-            if (hSvc) ImageList_AddIcon(self.il_exe, hSvc);
-            if (hExe) ImageList_AddIcon(self.il_exe, hExe);
-        }
+        self.il_svc = ImageList_Create(1, rowPx, ILC_COLOR32, 0, 1);
+        self.il_exe = ImageList_Create(1, rowPx, ILC_COLOR32, 0, 1);
 
         changed = true;
     }
@@ -718,6 +854,8 @@ void theme_apply_all_controls(App& self) {
     // Apply font to the main window subtree if we have one.
     if (self.hwnd && self.ui_font) {
         apply_font_recursive(self.hwnd, self.ui_font);
+        if (self.detail_name && self.theme.font_title)
+            SendMessageW(self.detail_name, WM_SETFONT, (WPARAM)self.theme.font_title, FALSE);
     }
 
     // Attach imagelists to listviews (if built)

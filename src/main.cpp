@@ -60,19 +60,20 @@ void request_save_debounced(App& self) {
     PostMessageW(self.hwnd, WM_APP_REQUEST_SAVE, 0, 0);
 }
 
-static void wake_monitor(App& self) {
-    {
-        std::lock_guard<std::shared_mutex> lk(self.mtx);
-        self.threads.mon_wake = true;
-    }
-    self.threads.mon_cv.notify_one();
+// Wake the monitor thread for an immediate tick. Lock-free: the monitor waits
+// on an auto-reset event (alertable, so service-change APCs also wake it).
+void monitor_wake(App& self) {
+    if (self.threads.mon_wake_event) SetEvent(self.threads.mon_wake_event.get());
 }
 
 void post_model_dirty(App& self) {
     if (self.ui_dirty_posted) return;
     self.ui_dirty_posted = true;
     PostMessageW(self.hwnd, WM_APP_MODEL_DIRTY, 0, 0);
-    wake_monitor(self);
+    // NOTE: deliberately does NOT wake the monitor. This runs on every UI
+    // refresh-timer tick and every status repaint; waking the monitor here made
+    // it poll at the UI refresh rate regardless of monitor_interval_ms. Model
+    // changes that need an immediate tick call monitor_wake() explicitly.
 }
 
 // ============================================================
@@ -207,10 +208,12 @@ static void add_item(App& self, ItemKind kind) {
             it = nullptr;
         }
     }
-    wake_monitor(self);  // wake monitor to pick up new item immediately
+    if (!it) {
+        msgbox_err(self.hwnd, L"Add", L"Could not add the item.");
+        return;
+    }
+    monitor_wake(self);  // wake monitor to pick up new item immediately
 
-    HWND lv = (kind == ItemKind::Svc) ? self.lv_svc : self.lv_exe;
-    (void)lv;
     rebuild_listview_filtered(self, kind);
 
     log_linef(self, L"Monitoring started (%s): %s (status: %s)",
@@ -240,7 +243,7 @@ static void remove_selected(App& self, ItemKind kind) {
         }
     }
     if (!removed) return;
-    wake_monitor(self);  // wake monitor to update snapshot
+    monitor_wake(self);  // wake monitor to update snapshot
 
     int idx = lv_find_item_by_name(lv, name);
     if (idx >= 0) ListView_DeleteItem(lv, idx);
@@ -304,6 +307,7 @@ bool cmd_set_autostop_uid(App& self, uint32_t uid, bool enabled, std::wstring* o
     if (changed && !name_for_log.empty()) {
         log_linef(self, L"%s: auto-stop %s", name_for_log.c_str(), enabled ? L"enabled" : L"disabled");
         post_model_dirty(self);
+        monitor_wake(self);  // enforce immediately if just enabled
         request_save_debounced(self);
     }
     return changed;
@@ -341,9 +345,9 @@ static bool handle_main_listview_notify(App& self, HWND hwnd, NMHDR* nh, LPARAM 
             // Populate UI caches while we hold the lock (avoids a third lock later)
             if (itp) {
                 if (itp->ui_cache_status_disp[0] == 0 && itp->last_status[0])
-                    StringCchCopyW(itp->ui_cache_status_disp, kStatusDispBuf, itp->last_status);
+                    ui_format_status(self, kind, itp, itp->last_status, itp->ui_cache_status_disp, kStatusDispBuf);
                 if (itp->ui_cache_last_text[0] == 0 && itp->last_update_wall)
-                    fmt_time_local(itp->ui_cache_last_text, 64, itp->last_update_wall);
+                    fmt_time_short(itp->ui_cache_last_text, 64, itp->last_update_wall);
             }
         }
         if (!itp) { out = 0; return true; }
@@ -451,9 +455,9 @@ static bool handle_main_listview_notify(App& self, HWND hwnd, NMHDR* nh, LPARAM 
         return true;
     }
 
-    // Double-click / Enter opens a quick details dialog
+    // Double-click / Enter used to pop a MessageBox duplicating the detail
+    // panel; the panel now shows everything (and updates live), so no-op.
     if (nh->code == NM_DBLCLK || nh->code == LVN_ITEMACTIVATE) {
-        show_item_details(self, kind);
         out = 0;
         return true;
     }
@@ -479,6 +483,11 @@ static bool handle_main_listview_notify(App& self, HWND hwnd, NMHDR* nh, LPARAM 
         }
         if (kd->wVKey == VK_SPACE) {
             toggle_autostop_selected(self, kind);
+            out = 0;
+            return true;
+        }
+        if (kd->wVKey == VK_DELETE) {
+            remove_selected(self, kind);
             out = 0;
             return true;
         }
@@ -510,12 +519,20 @@ static void sync_tabs_to(App& self, int sel) {
         if (sel == 0)
             set_cue_banner(self.action_add_edit, L"Service name or display name\u2026");
         else
-            set_cue_banner(self.action_add_edit, L"EXE name or full path\u2026");
+            set_cue_banner(self.action_add_edit, L"Program name (notepad.exe) or full path\u2026");
+        InvalidateRect(self.action_add_edit, NULL, TRUE);
     }
 
     // Update pill button visual state
     if (self.toolbar_tab_svc) InvalidateRect(self.toolbar_tab_svc, NULL, FALSE);
     if (self.toolbar_tab_exe) InvalidateRect(self.toolbar_tab_exe, NULL, FALSE);
+
+    // Detail panel follows the newly visible list's selection.
+    {
+        ItemKind kind = (sel == 0) ? ItemKind::Svc : ItemKind::Exe;
+        update_detail_panel(self, kind, lv_get_selected_item_ptr(self, kind));
+    }
+    update_statusbar(self);
 
     // Re-layout to adjust Browse button space
     if (self.hwnd) layout(self, self.hwnd);
@@ -632,16 +649,16 @@ static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hw
         AppendMenuW(self.menu_settings, MF_STRING, IDM_HOTKEYS, L"Hotkeys\u2026");
         AppendMenuW(self.menu_settings, MF_STRING, IDM_DIAGNOSTICS, L"Diagnostics\u2026");
         AppendMenuW(self.menu_settings, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(self.menu_settings, MF_STRING, IDM_EXIT_TO_TRAY, L"Exit to tray");
+        AppendMenuW(self.menu_settings, MF_STRING, IDM_EXIT_TO_TRAY, L"Minimize to tray");
         AppendMenuW(self.menu_settings, MF_STRING, IDM_EXIT, L"Quit");
         self.tray.taskbar_restart_msg = RegisterWindowMessageW(L"TaskbarCreated");
 
         allow_uipi_message(hwnd, WM_APP_TRAYICON);
         if (self.tray.taskbar_restart_msg) allow_uipi_message(hwnd, self.tray.taskbar_restart_msg);
 
-        if (!enum_services_build_disp_cache(&self.disp_cache)) {
-            log_linef(self, L"Display cache: enumerate failed");
-        }
+        // The service display-name cache is built lazily by resolve_service_name()
+        // the first time a display name is typed into Add; enumerating every
+        // installed service here only delayed the first paint.
 
         restart_ui_timer(self, hwnd);
 
@@ -663,7 +680,8 @@ static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hw
         self.threads.monitor_thread = std::jthread(monitor_thread_main, &self);
 
         // Flush any log messages queued before the UI existed (e.g. config load errors).
-        for (auto& msg : self.deferred_logs) post_log(self, msg.c_str());
+        // Already timestamped by log_linef; append directly in order.
+        for (auto& msg : self.deferred_logs) activity_append(self, self.activity, msg.c_str());
         self.deferred_logs.clear();
         self.deferred_logs.shrink_to_fit();
 
@@ -750,12 +768,23 @@ static LRESULT on_wm_contextmenu([[maybe_unused]] App& self, [[maybe_unused]] HW
             HMENU m = CreatePopupMenu();
             if (!m) return 0;
 
-            AppendMenuW(m, MF_STRING, IDM_CTX_STOP, L"Stop");
-            AppendMenuW(m, MF_STRING, IDM_CTX_REMOVE, L"Remove");
-            AppendMenuW(m, MF_STRING, IDM_CTX_TOGGLE_AUTO, L"Toggle auto-stop");
+            Item* sel_it = lv_get_selected_item_ptr(self, kind);
+            bool running = false, autos = false, has_path = false;
+            if (sel_it) {
+                ModelReadGuard lk(self);
+                running = sel_it->status_kind == 1 || sel_it->status_kind == 3;
+                autos = sel_it->auto_stop;
+                has_path = !sel_it->exe_path.empty();
+            }
+            const UINT en = sel_it ? 0 : MF_GRAYED;
+            if (running) AppendMenuW(m, MF_STRING | en, IDM_CTX_STOP, L"Stop");
+            else         AppendMenuW(m, MF_STRING | en, IDM_CTX_START, L"Start");
+            AppendMenuW(m, MF_STRING | en | (autos ? MF_CHECKED : 0), IDM_CTX_TOGGLE_AUTO, L"Keep stopped (auto-stop)\tSpace");
             AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-            AppendMenuW(m, MF_STRING, IDM_CTX_COPY_NAME, L"Copy name");
-            if (kind == ItemKind::Exe) AppendMenuW(m, MF_STRING, IDM_CTX_OPEN_LOC, L"Open file location");
+            AppendMenuW(m, MF_STRING | en, IDM_CTX_COPY_NAME, L"Copy name\tCtrl+C");
+            if (kind == ItemKind::Exe) AppendMenuW(m, MF_STRING | (has_path ? 0 : MF_GRAYED), IDM_CTX_OPEN_LOC, L"Open file location");
+            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(m, MF_STRING | en, IDM_CTX_REMOVE, L"Remove\tDel");
 
             SetForegroundWindow(hwnd);
             UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
@@ -763,6 +792,7 @@ static LRESULT on_wm_contextmenu([[maybe_unused]] App& self, [[maybe_unused]] HW
 
             switch (cmd) {
             case IDM_CTX_STOP:        stop_selected(self, kind); break;
+            case IDM_CTX_START:       start_selected(self, kind); break;
             case IDM_CTX_REMOVE:      remove_selected(self, kind); break;
             case IDM_CTX_TOGGLE_AUTO: toggle_autostop_selected(self, kind); break;
             case IDM_CTX_COPY_NAME: {
@@ -770,8 +800,10 @@ static LRESULT on_wm_contextmenu([[maybe_unused]] App& self, [[maybe_unused]] HW
                 if (it) clipboard_set_text(hwnd, it->name.c_str());
             } break;
             case IDM_CTX_OPEN_LOC: {
+                // Was passing it->name (e.g. "notepad.exe"), which is never a
+                // path, so this always showed the "not a full path" message.
                 Item* it = lv_get_selected_item_ptr(self, kind);
-                if (it) open_file_location_best_effort(self, it->name.c_str());
+                if (it) open_file_location_best_effort(self, it->exe_path.empty() ? it->name.c_str() : it->exe_path.c_str());
             } break;
             default: break;
             }
@@ -1060,6 +1092,31 @@ static LRESULT on_wm_command([[maybe_unused]] App& self, [[maybe_unused]] HWND h
             return 0;
         }
 
+        if (id == IDC_DETAIL_AUTOSTOP && code == BN_CLICKED) {
+            ItemKind kind = (self.active_tab == 0) ? ItemKind::Svc : ItemKind::Exe;
+            if (self.detail_uid) {
+                const bool on = SendMessageW(self.detail_autostop, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                (void)cmd_set_autostop_uid(self, self.detail_uid, on);
+                HWND lv = (kind == ItemKind::Svc) ? self.lv_svc : self.lv_exe;
+                if (lv) InvalidateRect(lv, NULL, FALSE);
+                Item* it = nullptr;
+                { ModelReadGuard lk(self); it = uid_to_item_ptr_unlocked(self, self.detail_uid); }
+                update_detail_panel(self, kind, it);
+                update_statusbar(self);
+            }
+            return 0;
+        }
+        if (id == IDC_DETAIL_OPEN_BTN && code == BN_CLICKED) {
+            ItemKind kind = (self.active_tab == 0) ? ItemKind::Svc : ItemKind::Exe;
+            Item* it = lv_get_selected_item_ptr(self, kind);
+            if (it) open_file_location_best_effort(self, it->exe_path.empty() ? it->name.c_str() : it->exe_path.c_str());
+            return 0;
+        }
+        if (id == IDC_ACTIVITY_CLEAR && code == BN_CLICKED) {
+            if (self.activity) SendMessageW(self.activity, LB_RESETCONTENT, 0, 0);
+            return 0;
+        }
+
         // Activity collapse
         if (id == IDC_ACTIVITY_COLLAPSE && code == BN_CLICKED) {
             self.activity_collapsed = !self.activity_collapsed;
@@ -1102,7 +1159,7 @@ static LRESULT on_wm_command([[maybe_unused]] App& self, [[maybe_unused]] HWND h
             if (lv) {
                 HWND hdr = ListView_GetHeader(lv);
                 int ncol = hdr ? Header_GetItemCount(hdr) : 0;
-                ListView_SetColumnWidth(lv, 0, S(40));
+                ListView_SetColumnWidth(lv, 0, S(84));
                 ListView_SetColumnWidth(lv, 1, S(260));
                 ListView_SetColumnWidth(lv, 2, S(100));
                 if (ncol == 4) {
@@ -1280,15 +1337,18 @@ switch (msg) {
     case WM_NOTIFY:
         return on_wm_notify(self, hwnd, msg, wParam, lParam);
 
-    case WM_ERASEBKGND: {
-        HDC hdc = (HDC)wParam;
-        RECT rc; GetClientRect(hwnd, &rc);
-        FillRect(hdc, &rc, self.theme.br_bg);
-        return 1;
-    }
+    case WM_ERASEBKGND:
+        return 1;  // main_paint fills the background
+    case WM_PAINT:
+        main_paint(self, hwnd);
+        return 0;
     case WM_MEASUREITEM: {
         auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
         if (!mis) break;
+        if (mis->CtlType == ODT_LISTBOX && mis->CtlID == IDC_ACTIVITY) {
+            mis->itemHeight = (UINT)dpi_scale(self.dpi ? self.dpi : 96, 22);
+            return TRUE;
+        }
         if (self.theme.dark_mode && (mis->CtlType == ODT_MENU || mis->CtlType == ODT_TAB)) {
             HDC hdc = GetDC(hwnd);
             HFONT oldf = NULL;
@@ -1329,6 +1389,10 @@ switch (msg) {
             DrawTextW(dis->hDC, self.statusbar_text.c_str(), (int)self.statusbar_text.size(), &tr,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
             if (oldf) SelectObject(dis->hDC, oldf);
+            return TRUE;
+        }
+        if (dis && dis->CtlID == IDC_ACTIVITY && dis->CtlType == ODT_LISTBOX) {
+            activity_draw_item(self, dis);
             return TRUE;
         }
         // Detail panel separator (themed horizontal line)
@@ -1605,8 +1669,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int show) {
 
     int start_x = CW_USEDEFAULT;
     int start_y = CW_USEDEFAULT;
-    int start_w = 1100;
-    int start_h = 600;
+    // First-run size scaled for the system DPI (saved placement wins below).
+    const UINT sys_dpi = g_dll_cache.GetDpiForSystem ? g_dll_cache.GetDpiForSystem() : 96;
+    int start_w = dpi_scale(sys_dpi, 1180);
+    int start_h = dpi_scale(sys_dpi, 720);
     if (self.have_win_rect) {
         start_x = self.win_x;
         start_y = self.win_y;

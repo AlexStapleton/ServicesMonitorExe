@@ -187,6 +187,7 @@ void scale_children(HWND parent, UINT old_dpi, UINT new_dpi);
 // --------------------------------------------------
 uint64_t now_mono_ms();
 void     fmt_time_local(wchar_t* buf, size_t cch, time_t t);
+void     fmt_time_short(wchar_t* buf, size_t cch, time_t t);
 void     trim_ws_inplace(wchar_t* s);
 void     str_lower_inplace(std::wstring& s);
 void     str_lower_inplace(wchar_t* s);
