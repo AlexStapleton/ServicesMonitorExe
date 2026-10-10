@@ -78,70 +78,62 @@ bool try_set_explorer_theme_mode(HWND hwnd, bool dark) {
 LRESULT CALLBACK DarkButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                               UINT_PTR /*idSubclass*/, DWORD_PTR refData) {
     App* self = reinterpret_cast<App*>(refData);
+    // Owner-draw buttons (the tab "pills") are painted by their parent's
+    // WM_DRAWITEM; we only add hover tracking for them.
+    const bool owner_draw = (GetWindowLongPtrW(hwnd, GWL_STYLE) & BS_TYPEMASK) == BS_OWNERDRAW;
     switch (msg) {
+    case WM_MOUSEMOVE:
+        if (!GetPropW(hwnd, L"SEM_HOT")) {
+            SetPropW(hwnd, L"SEM_HOT", (HANDLE)1);
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        RemovePropW(hwnd, L"SEM_HOT");
+        InvalidateRect(hwnd, NULL, FALSE);
+        break;
     case WM_ERASEBKGND:
-        if (self) return 1;  // suppress erase in both modes — we paint the full rect
+        if (self && !owner_draw) return 1;  // we paint the full rect
         break;
     case WM_ENABLE:
     case WM_THEMECHANGED:
     case WM_STYLECHANGED:
-        InvalidateRect(hwnd, NULL, TRUE);
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(hwnd, NULL, FALSE);
         break;
+    case BM_SETSTATE: {
+        LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return r;
+    }
     case WM_PAINT: {
-        if (!self) break;
-
+        if (!self || owner_draw) break;
         PAINTSTRUCT ps{};
         HDC hdc = BeginPaint(hwnd, &ps);
+        // Double-buffer: rounded fills + text in two passes would flicker on hover.
         RECT rc{}; GetClientRect(hwnd, &rc);
-
-        const bool disabled = !IsWindowEnabled(hwnd);
-        const LRESULT st = SendMessageW(hwnd, BM_GETSTATE, 0, 0);
-        const bool pressed = (st & BST_PUSHED) != 0;
-
-        if (self->theme.dark_mode) {
-            // Dark mode — cached brushes/pens
-            FillRect(hdc, &rc, pressed ? self->theme.br_pressed : self->theme.br_panel);
-            HGDIOBJ oldp = SelectObject(hdc, self->theme.pen_border);
-            HGDIOBJ oldb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
-            SelectObject(hdc, oldb);
-            SelectObject(hdc, oldp);
+        HDC mem = CreateCompatibleDC(hdc);
+        HBITMAP bmp = mem ? CreateCompatibleBitmap(hdc, rc.right, rc.bottom) : NULL;
+        if (mem && bmp) {
+            HGDIOBJ oldb = SelectObject(mem, bmp);
+            theme_paint_button(*self, hwnd, mem);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, oldb);
         } else {
-            // Light mode — use system stock brush (no alloc)
-            FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
-            DrawEdge(hdc, &rc, pressed ? EDGE_SUNKEN : EDGE_RAISED, BF_RECT);
+            theme_paint_button(*self, hwnd, hdc);
         }
-
-        // Text
-        wchar_t txt[256]{0};
-        GetWindowTextW(hwnd, txt, 255);
-        SetBkMode(hdc, TRANSPARENT);
-        if (self->theme.dark_mode) {
-            SetTextColor(hdc, disabled ? self->theme.col_text_dim : self->theme.col_text);
-        } else {
-            SetTextColor(hdc, disabled ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_BTNTEXT));
-        }
-
-        HFONT hfont = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
-        HGDIOBJ oldf = NULL;
-        if (hfont) oldf = SelectObject(hdc, hfont);
-
-        RECT tr = rc;
-        if (pressed) { tr.left += 1; tr.top += 1; }
-        DrawTextW(hdc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        if (oldf) SelectObject(hdc, oldf);
-
-        // Focus rect
-        if (GetFocus() == hwnd && !disabled) {
-            RECT fr = rc;
-            InflateRect(&fr, -3, -3);
-            DrawFocusRect(hdc, &fr);
-        }
-
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_NCDESTROY:
+        RemovePropW(hwnd, L"SEM_HOT");
+        RemovePropW(hwnd, L"SEM_GLYPH");
+        RemovePropW(hwnd, L"SEM_BTNSTYLE");
         RemoveWindowSubclass(hwnd, DarkButtonSubclassProc, 1);
         break;
     }

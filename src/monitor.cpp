@@ -39,40 +39,69 @@ std::wstring query_service_description_best_effort(const std::wstring& svc_name,
 }
 
 void update_detail_panel(App& self, ItemKind kind, Item* it) {
-    // Clear all detail controls if no item
+    HWND item_ctrls[] = { self.detail_status_lbl, self.detail_autostop, self.detail_meta, self.detail_desc,
+                          self.detail_stop_btn, self.detail_start_btn, self.detail_remove_btn, self.detail_copy_btn };
+    const uint32_t prev_uid = self.detail_uid;
+
     if (!it) {
-        if (self.detail_name) SetWindowTextW(self.detail_name, L"");
-        if (self.detail_status_lbl) SetWindowTextW(self.detail_status_lbl, L"Status:");
-        if (self.detail_autostop) SetWindowTextW(self.detail_autostop, L"Auto-stop:");
-        if (self.detail_desc) SetWindowTextW(self.detail_desc, L"");
+        self.detail_uid = 0;
+        if (self.detail_name) SetWindowTextW(self.detail_name, L"Nothing selected");
+        if (self.detail_kind) SetWindowTextW(self.detail_kind, L"Select an item in the list.");
+        for (HWND h : item_ctrls) if (h) ShowWindow(h, SW_HIDE);
+        if (self.detail_open_btn) ShowWindow(self.detail_open_btn, SW_HIDE);
+        if (prev_uid && self.hwnd) layout(self, self.hwnd);
         return;
     }
 
-    // Name
+    // Snapshot the fields we display under the model lock (the monitor thread
+    // writes status/counters).
+    wchar_t status_raw[32];
+    bool auto_stop; int count; time_t wall; uint8_t sk;
+    {
+        ModelReadGuard lk(self);
+        StringCchCopyW(status_raw, 32, it->last_status);
+        auto_stop = it->auto_stop;
+        count = it->autostop_count;
+        wall = it->last_update_wall;
+        sk = it->status_kind;
+    }
+    self.detail_uid = it->uid;
+    for (HWND h : item_ctrls) if (h) ShowWindow(h, SW_SHOW);
+
     if (self.detail_name) SetWindowTextW(self.detail_name, it->name.c_str());
 
-    // Status
-    if (self.detail_status_lbl) {
-        wchar_t buf[128];
-        StringCchPrintfW(buf, 128, L"Status: %s", it->last_status[0] ? it->last_status : L"unknown");
-        SetWindowTextW(self.detail_status_lbl, buf);
+    if (self.detail_kind) {
+        if (kind == ItemKind::Svc) SetWindowTextW(self.detail_kind, L"Windows service");
+        else SetWindowTextW(self.detail_kind, it->exe_path.empty() ? L"Executable (matched by name)" : it->exe_path.c_str());
     }
 
-    // Auto-stop
+    if (self.detail_status_lbl) {
+        wchar_t buf[kStatusDispBuf];
+        ui_format_status(self, kind, it, status_raw, buf, kStatusDispBuf);
+        self.detail_status_col = theme_status_color(self, sk, auto_stop);
+        SetWindowTextW(self.detail_status_lbl, buf);
+        InvalidateRect(self.detail_status_lbl, NULL, TRUE);
+    }
+
     if (self.detail_autostop) {
-        wchar_t buf[128];
-        if (it->auto_stop) {
-            StringCchPrintfW(buf, 128, L"Auto-stop: Enabled (%d times)", it->autostop_count);
-        } else {
-            StringCchCopyW(buf, 128, L"Auto-stop: Disabled");
-        }
-        SetWindowTextW(self.detail_autostop, buf);
+        SendMessageW(self.detail_autostop, BM_SETCHECK, auto_stop ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    if (self.detail_meta) {
+        wchar_t when[64];
+        fmt_time_short(when, 64, wall);
+        wchar_t buf[160];
+        if (count > 0)
+            StringCchPrintfW(buf, 160, L"Stopped automatically %d time%s · last change %s", count, count == 1 ? L"" : L"s", when);
+        else
+            StringCchPrintfW(buf, 160, L"Last change %s", when);
+        SetWindowTextW(self.detail_meta, buf);
     }
 
     // Description / Info
     if (self.detail_desc) {
         if (kind == ItemKind::Svc) {
-            // Lazy-load service description
+            // Lazy-load service description (one SCM query per item, cached)
             if (!it->svc_desc_loaded) {
                 DWORD err = 0;
                 std::wstring desc = query_service_description_best_effort(it->name, err);
@@ -83,30 +112,32 @@ void update_detail_panel(App& self, ItemKind kind, Item* it) {
 
             if (!it->svc_desc.empty()) {
                 SetWindowTextW(self.detail_desc, it->svc_desc.c_str());
+            } else if (it->svc_desc_last_err == ERROR_SERVICE_DOES_NOT_EXIST) {
+                SetWindowTextW(self.detail_desc, L"This service isn't installed on this PC.");
             } else if (it->svc_desc_last_err) {
                 wchar_t buf[256];
-                StringCchPrintfW(buf, 256, L"(No description. Query failed: winerror %lu)", (unsigned long)it->svc_desc_last_err);
+                StringCchPrintfW(buf, 256, L"No description available (error %lu).", (unsigned long)it->svc_desc_last_err);
                 SetWindowTextW(self.detail_desc, buf);
             } else {
-                SetWindowTextW(self.detail_desc, L"(No description)");
+                SetWindowTextW(self.detail_desc, L"No description.");
             }
         } else {
-            std::wstring info;
-            if (!it->exe_path.empty()) {
-                info = L"Path:\r\n" + it->exe_path;
-            } else {
-                info = L"Name: " + it->name;
-            }
-            SetWindowTextW(self.detail_desc, info.c_str());
+            SetWindowTextW(self.detail_desc, it->exe_path.empty()
+                ? L"Matched by process name. Add it with a full path (or use Browse…) to enable Start and Open location."
+                : L"");
         }
     }
 
-    // Show/hide Stop vs Start buttons based on status
+    // One Start/Stop button, chosen by current state.
     if (self.detail_stop_btn && self.detail_start_btn) {
-        bool is_running = (_wcsicmp(it->last_status, L"running") == 0);
+        bool is_running = (sk == 1 || sk == 3);
         ShowWindow(self.detail_stop_btn, is_running ? SW_SHOW : SW_HIDE);
         ShowWindow(self.detail_start_btn, is_running ? SW_HIDE : SW_SHOW);
     }
+
+    // Selection moved between "nothing" and an item, or EXE path presence may
+    // change the button grid: re-run layout for the card.
+    if (prev_uid != self.detail_uid && self.hwnd) layout(self, self.hwnd);
 }
 
 

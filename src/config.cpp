@@ -17,7 +17,7 @@ bool parse_setting(App& self, const wchar_t* key, const wchar_t* val) {
     if (_wcsicmp(key, L"config_version") == 0) {
         int v = _wtoi(val);
         if (v > kConfigVersion) {
-            self.deferred_logs.push_back(
+            log_linef(self, L"%s",
                 L"Config was written by a newer version of the app; "
                 L"unrecognized settings will be ignored.");
         }
@@ -466,14 +466,14 @@ void load_config(App& self) {
     if (sz <= 0 || sz > kMaxConfigBytes) {
         fclose(f);
         if (sz > kMaxConfigBytes)
-            self.deferred_logs.push_back(L"Config file too large — using defaults");
+            log_linef(self, L"%s", L"Config file too large — using defaults");
         return;
     }
     std::vector<char> bytes((size_t)sz + 1);
     size_t nread = fread(bytes.data(), 1, (size_t)sz, f);
     fclose(f);
     if (nread == 0) {
-        self.deferred_logs.push_back(L"Config file could not be read — using defaults");
+        log_linef(self, L"%s", L"Config file could not be read — using defaults");
         return;
     }
     bytes[nread] = 0;

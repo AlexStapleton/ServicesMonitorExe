@@ -48,6 +48,21 @@ void fmt_time_local(wchar_t* buf, size_t cch, time_t t) {
     StringCchCopyW(buf, cch, tmp);
 }
 
+// Compact timestamp for list cells: "14:02:11" today, "Oct 9, 14:02" otherwise.
+void fmt_time_short(wchar_t* buf, size_t cch, time_t t) {
+    if (!t) { StringCchCopyW(buf, cch, L"\u2014"); return; }
+    struct tm lt, now_lt;
+    time_t now = time(NULL);
+    localtime_s(&lt, &t);
+    localtime_s(&now_lt, &now);
+    wchar_t tmp[64];
+    if (lt.tm_year == now_lt.tm_year && lt.tm_yday == now_lt.tm_yday)
+        wcsftime(tmp, 64, L"%H:%M:%S", &lt);
+    else
+        wcsftime(tmp, 64, L"%b %d, %H:%M", &lt);
+    StringCchCopyW(buf, cch, tmp);
+}
+
 void trim_ws_inplace(wchar_t* s) {
     if (!s) return;
     size_t n = wcslen(s);

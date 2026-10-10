@@ -104,6 +104,7 @@ constexpr int IDM_CTX_REMOVE         = 40101;
 constexpr int IDM_CTX_TOGGLE_AUTO    = 40102;
 constexpr int IDM_CTX_COPY_NAME      = 40103;
 constexpr int IDM_CTX_OPEN_LOC       = 40104;
+constexpr int IDM_CTX_START          = 40105;
 constexpr int IDM_LOG_COPY_LINE      = 40110;
 constexpr int IDM_LOG_CLEAR_ALL      = 40111;
 
@@ -133,6 +134,10 @@ constexpr int IDC_DETAIL_REMOVE_BTN = 5037;
 constexpr int IDC_DETAIL_COPY_BTN   = 5038;
 constexpr int IDC_DETAIL_SEP        = 5039;
 constexpr int IDC_ACTIVITY_COLLAPSE = 5040;
+constexpr int IDC_DETAIL_KIND       = 5041;
+constexpr int IDC_DETAIL_META       = 5042;
+constexpr int IDC_DETAIL_OPEN_BTN   = 5043;
+constexpr int IDC_ACTIVITY_CLEAR    = 5044;
 constexpr int IDC_HSPLIT_ACTIVITY   = 7005;
 
 constexpr int IDC_STATUSBAR      = 5900;
@@ -201,15 +206,15 @@ constexpr int IDC_PROF_TAB_EXE        = 8329;
 constexpr int SPLITTER_WIDTH     = 6;   // vertical splitter (at 96 DPI)
 constexpr int HSPLITTER_HEIGHT   = 6;   // horizontal splitter (at 96 DPI)
 constexpr int LAYOUT_PAD         = 4;   // standard inter-control padding (at 96 DPI)
-constexpr int COLLAPSE_BTN_H    = 22;  // activity collapse button height (at 96 DPI)
+constexpr int COLLAPSE_BTN_H    = 30;  // activity header row height (at 96 DPI)
 constexpr int MIN_CONTENT_ABOVE_ACTIVITY = 120; // min space for list area above activity (at 96 DPI)
 constexpr int DETAIL_BTN_GAP    = 6;   // gap between detail panel buttons (at 96 DPI)
 
 constexpr int NUM_LV_COLS       = 5;   // Auto Stop, Name, Status, Description, Last Update
-constexpr int TOOLBAR_H         = 38;  // at 96 DPI
-constexpr int ACTION_STRIP_H    = 34;  // at 96 DPI
-constexpr int DETAIL_MIN_W      = 180;
-constexpr int DETAIL_DEFAULT_W  = 260;
+constexpr int TOOLBAR_H         = 48;  // header: tabs | search | profile + settings (at 96 DPI)
+constexpr int ACTION_STRIP_H    = 44;  // add row + summary (at 96 DPI)
+constexpr int DETAIL_MIN_W      = 220;
+constexpr int DETAIL_DEFAULT_W  = 280;
 constexpr int ACTIVITY_MIN_H    = 50;
 constexpr int ACTIVITY_DEFAULT_H = 130;
 
@@ -222,6 +227,30 @@ constexpr COLORREF DK_HIGHLIGHT   = RGB(80, 80, 80);   // splitter grip, hover h
 constexpr COLORREF DK_SEPARATOR   = RGB(60, 60, 60);   // separator lines
 constexpr COLORREF DK_ACCENT      = RGB(60, 120, 200); // accent (active tab underline)
 constexpr COLORREF LT_ACCENT      = RGB(0, 90, 180);   // light-mode accent
+
+// --------------------------------------------------
+// Icon glyphs (Segoe Fluent Icons on Win11; same code points in Segoe MDL2
+// Assets on Win10). Drawn by theme_paint_button when the font is available;
+// buttons fall back to their text label otherwise.
+// --------------------------------------------------
+constexpr wchar_t GLYPH_ADD      = 0xE710;
+constexpr wchar_t GLYPH_SETTINGS = 0xE713;
+constexpr wchar_t GLYPH_SEARCH   = 0xE721;
+constexpr wchar_t GLYPH_DELETE   = 0xE74D;
+constexpr wchar_t GLYPH_PLAY     = 0xE768;
+constexpr wchar_t GLYPH_STOP     = 0xE71A;
+constexpr wchar_t GLYPH_COPY     = 0xE8C8;
+constexpr wchar_t GLYPH_FOLDER   = 0xE838;
+constexpr wchar_t GLYPH_PROFILE  = 0xE77B;
+constexpr wchar_t GLYPH_UP       = 0xE70E;
+constexpr wchar_t GLYPH_DOWN     = 0xE70D;
+constexpr wchar_t GLYPH_CLEAR    = 0xE894;
+constexpr wchar_t GLYPH_RENAME   = 0xE8AC;
+
+// Per-button style flags (stored as a window property; see ui_button_style)
+constexpr UINT BTNSTYLE_ACCENT    = 0x1;  // filled accent (primary action)
+constexpr UINT BTNSTYLE_SUBTLE    = 0x2;  // no fill/border until hovered (toolbar icons)
+constexpr UINT BTNSTYLE_ICON_ONLY = 0x4;  // draw glyph only (label used as tooltip / fallback)
 
 // --------------------------------------------------
 // Data model
@@ -243,7 +272,8 @@ struct Item {
     time_t   last_update_wall = 0;
     // Cached numeric classification of last_status — avoids per-cell _wcsicmp
     // in the ListView custom-draw hot path. Updated whenever last_status is
-    // written. 0=other/unknown, 1=running, 2=stopped.
+    // written. 0=other/unknown, 1=running, 2=stopped, 3=pending (starting/
+    // stopping/pausing/resuming), 4=not found.
     uint8_t  status_kind = 0;
 
     wchar_t  ui_last_status[32]{};
@@ -261,15 +291,23 @@ struct Item {
     DWORD    svc_last_stop_err = 0;
 };
 
+inline uint8_t status_kind_of(const wchar_t* s) {
+    if (!s) return 0;
+    if (_wcsicmp(s, L"running") == 0)   return 1;
+    if (_wcsicmp(s, L"stopped") == 0)   return 2;
+    if (_wcsicmp(s, L"starting") == 0 || _wcsicmp(s, L"stopping") == 0 ||
+        _wcsicmp(s, L"pausing") == 0  || _wcsicmp(s, L"resuming") == 0) return 3;
+    if (_wcsicmp(s, L"not found") == 0) return 4;
+    return 0;
+}
+
 // Write last_status and keep status_kind in sync. All code paths that update
 // Item::last_status MUST go through this helper so the custom-draw hot path
 // (which reads status_kind, not the string) stays correct.
 inline void set_item_status(Item& it, const wchar_t* s) {
     if (!s) s = L"";
     StringCchCopyW(it.last_status, 32, s);
-    if (_wcsicmp(s, L"running") == 0)      it.status_kind = 1;
-    else if (_wcsicmp(s, L"stopped") == 0) it.status_kind = 2;
-    else                                    it.status_kind = 0;
+    it.status_kind = status_kind_of(s);
 }
 
 struct ItemList {
@@ -426,10 +464,23 @@ struct ThemeState {
     HPEN   pen_accent = NULL;   // DK_ACCENT outline
     HPEN   pen_separator = NULL; // DK_SEPARATOR outline (detail panel)
 
-    // Light-mode pill tab cached GDI (avoids per-paint create/delete)
-    HBRUSH br_lt_accent = NULL;   // LT_ACCENT fill
-    HPEN   pen_lt_accent = NULL;  // LT_ACCENT outline
-    HPEN   pen_lt_border = NULL;  // light border outline RGB(180,180,180)
+    // Fluent-style palette (both modes; see theme_update_resources)
+    COLORREF col_card = 0;          // detail panel / grouped surfaces
+    COLORREF col_border = 0;        // hairlines, control borders
+    COLORREF col_ctrl = 0;          // button rest fill
+    COLORREF col_ctrl_hot = 0;      // button hover fill
+    COLORREF col_ctrl_pressed = 0;  // button pressed fill
+    COLORREF col_accent = 0;        // primary/selected accent
+    COLORREF col_on_accent = 0;     // text on accent fill
+    COLORREF col_ok = 0;            // running
+    COLORREF col_warn = 0;          // running but should be stopped / pending
+    COLORREF col_err = 0;           // errors
+    HBRUSH br_card = NULL;
+
+    // DPI-dependent fonts (rebuilt in theme_compute when DPI changes)
+    HFONT font_title = NULL;        // detail-panel item name
+    HFONT font_bold = NULL;         // section headers, selected tab
+    HFONT font_icon = NULL;         // Segoe Fluent Icons / Segoe MDL2 Assets (NULL if neither installed)
 
     std::atomic<uint32_t> gen{1};
 };
@@ -503,6 +554,15 @@ struct LayoutState {
     UINT initial_layout_tries = 0;
 
     bool in_size_move = false;
+
+    // Areas painted directly by the main window's WM_PAINT (computed by layout()).
+    RECT rc_search_frame{};   // rounded frame + magnifier around the search edit
+    RECT rc_add_frame{};      // rounded frame around the "add item" edit
+    RECT rc_summary{};        // "N items · N running · N auto-stop" text
+    RECT rc_activity_hdr{};   // "Activity" label
+    RECT rc_list_frame{};     // hairline around the list
+    RECT rc_log_frame{};      // hairline around the activity log
+    int  header_line_y = -1;  // hairline under the header row
 };
 
 struct App {
@@ -568,11 +628,18 @@ struct App {
     HWND detail_start_btn = NULL;
     HWND detail_remove_btn = NULL;
     HWND detail_copy_btn = NULL;
+    HWND detail_open_btn = NULL;   // EXE only: open file location
+    HWND detail_kind = NULL;       // subtitle: "Windows service" / exe path
+    HWND detail_meta = NULL;       // "Stopped automatically N times · last change …"
     HWND detail_sep = NULL;
+    uint32_t detail_uid = 0;       // item currently shown in the detail panel (0 = none)
+    COLORREF detail_status_col = 0; // status line color (set by update_detail_panel)
+    std::wstring summary_text;     // painted in the action row (see layout_state.rc_summary)
     int  detail_panel_w = DETAIL_DEFAULT_W;
 
     // -- Activity (bottom) --
     HWND activity_collapse_btn = NULL;
+    HWND activity_clear_btn = NULL;
     int  activity_panel_h = ACTIVITY_DEFAULT_H;
     bool activity_collapsed = false;
 
@@ -736,6 +803,10 @@ HFONT theme_ensure_font_for_dpi(App& self, UINT dpi);
 void theme_apply_to_window(App& self, HWND hwnd);
 HBRUSH theme_handle_ctlcolor(App& self, UINT msg, WPARAM wParam, LPARAM lParam);
 bool theme_draw_owner_button(App& self, const DRAWITEMSTRUCT* dis);
+void theme_paint_button(App& self, HWND btn, HDC hdc);
+void ui_button_style(HWND btn, wchar_t glyph, UINT flags);
+void theme_fill_round(HDC hdc, const RECT& rc, int radius, COLORREF fill, COLORREF border);
+COLORREF theme_status_color(const App& self, uint8_t status_kind, bool auto_stop);
 bool theme_draw_pill(App& self, const DRAWITEMSTRUCT* dis, bool is_selected);
 bool theme_draw_owner_tab(App& self, const DRAWITEMSTRUCT* dis);
 bool theme_draw_owner_menu(App& self, const DRAWITEMSTRUCT* dis);
@@ -814,8 +885,10 @@ void lv_on_column_click(App& self, ItemKind kind, int col);
 Item* lv_get_selected_item_ptr(App& self, ItemKind kind);
 void toggle_autostop_selected(App& self, ItemKind kind);
 bool cmd_set_autostop_uid(App& self, uint32_t uid, bool enabled, std::wstring* out_name_opt = nullptr);
-void show_item_details(App& self, ItemKind kind);
 void update_detail_panel(App& self, ItemKind kind, Item* it);
+void ui_format_status(App& self, ItemKind kind, const Item* it, const wchar_t* status_raw, wchar_t* out, size_t cch);
+void main_paint(App& self, HWND hwnd);
+void activity_draw_item(App& self, const DRAWITEMSTRUCT* dis);
 void open_file_location_best_effort(App& self, const wchar_t* exeOrPath);
 
 // UI layout
