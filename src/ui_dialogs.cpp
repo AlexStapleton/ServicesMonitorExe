@@ -396,18 +396,19 @@ void open_prefs_dialog(App& self, HWND parent) {
 static void hotkeys_fill_list(HWND lv) {
     struct HK { const wchar_t* key; const wchar_t* action; };
     static const HK k[] = {
-        { L"Ctrl+F",        L"Focus search (Services/EXEs)" },
-        { L"Esc",           L"Clear search (works from search box or list)" },
+        { L"Ctrl+F",        L"Focus search" },
+        { L"Esc",           L"Clear search (in the search box)" },
         { L"Ctrl+1",        L"Switch to Services tab" },
-        { L"Ctrl+2",        L"Switch to EXEs tab" },
-        { L"Ctrl+S",        L"Save config now" },
+        { L"Ctrl+2",        L"Switch to Executables tab" },
         { L"Ctrl+L",        L"Focus the main list" },
-        { L"F5",            L"Refresh UI (force resync)" },
-        { L"Ctrl+Shift+D",  L"Toggle Dark Mode" },
-        { L"Enter",         L"Show details (selected item)" },
+        { L"Enter",         L"Add the item typed in the add box" },
+        { L"Space",         L"Toggle auto-stop (selected item)" },
         { L"Del",           L"Remove selected item" },
-        { L"Space",         L"Toggle Auto-stop (selected item)" },
         { L"Ctrl+C",        L"Copy selected name" },
+        { L"Ctrl+G",        L"Show / hide the activity log" },
+        { L"Ctrl+D",        L"Toggle dark mode" },
+        { L"Ctrl+S",        L"Save config now" },
+        { L"F5",            L"Refresh UI (force resync)" },
     };
 
     ListView_DeleteAllItems(lv);
