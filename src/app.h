@@ -888,6 +888,8 @@ bool cmd_set_autostop_uid(App& self, uint32_t uid, bool enabled, std::wstring* o
 void update_detail_panel(App& self, ItemKind kind, Item* it);
 void ui_format_status(App& self, ItemKind kind, const Item* it, const wchar_t* status_raw, wchar_t* out, size_t cch);
 void main_paint(App& self, HWND hwnd);
+void detail_desc_update_scrollbar(App& self);
+void detail_desc_set_text(App& self, const wchar_t* text);
 void activity_draw_item(App& self, const DRAWITEMSTRUCT* dis);
 void open_file_location_best_effort(App& self, const wchar_t* exeOrPath);
 

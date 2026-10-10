@@ -357,7 +357,7 @@ void build_ui(App& self, HWND hwnd) {
     self.detail_meta = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
         0, 0, 10, 10, dp, (HMENU)(INT_PTR)IDC_DETAIL_META, hInst, NULL);
     self.detail_desc = CreateWindowExW(0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
         0, 0, 10, 10, dp, (HMENU)(INT_PTR)IDC_DETAIL_DESC, hInst, NULL);
 
     self.detail_stop_btn = button(dp, L"Stop", IDC_DETAIL_STOP_BTN);
@@ -616,6 +616,45 @@ static LRESULT CALLBACK SearchEditSubclassProc(HWND edit, UINT msg, WPARAM wPara
 }
 
 
+// The description box shows a vertical scrollbar only when its text is taller
+// than the box (long service descriptions were cut off with no way to scroll).
+// Re-run whenever the text or the box size changes.
+void detail_desc_update_scrollbar(App& self) {
+    HWND e = self.detail_desc;
+    if (!e) return;
+    ShowScrollBar(e, SB_VERT, FALSE);  // measure at the full wrap width first
+
+    RECT rc{}; GetClientRect(e, &rc);
+    int line_h = 0;
+    if (HDC hdc = GetDC(e)) {
+        HGDIOBJ of = SelectObject(hdc, (HFONT)SendMessageW(e, WM_GETFONT, 0, 0));
+        TEXTMETRICW tm{};
+        if (GetTextMetricsW(hdc, &tm)) line_h = tm.tmHeight + tm.tmExternalLeading;
+        SelectObject(hdc, of);
+        ReleaseDC(e, hdc);
+    }
+    if (line_h <= 0) return;
+    const int lines = (int)SendMessageW(e, EM_GETLINECOUNT, 0, 0);
+    if (lines * line_h > (rc.bottom - rc.top)) ShowScrollBar(e, SB_VERT, TRUE);
+}
+
+// Replace the description only when it differs, so the live status refresh
+// doesn't throw the reader back to the top; new text starts scrolled to the top.
+void detail_desc_set_text(App& self, const wchar_t* text) {
+    HWND e = self.detail_desc;
+    if (!e) return;
+    if (!text) text = L"";
+    const int len = GetWindowTextLengthW(e);
+    std::wstring cur((size_t)len + 1, L'\0');
+    GetWindowTextW(e, cur.data(), len + 1);
+    cur.resize((size_t)len);
+    if (cur == text) return;
+    SetWindowTextW(e, text);
+    SendMessageW(e, EM_SETSEL, 0, 0);
+    SendMessageW(e, WM_VSCROLL, SB_TOP, 0);
+    detail_desc_update_scrollbar(self);
+}
+
 void layout(App& self, HWND hwnd) {
     UINT dpi = self.dpi ? self.dpi : get_dpi_for_hwnd(hwnd);
     auto S = [&](int v96) -> int { return dpi_scale(dpi, v96); };
@@ -799,23 +838,18 @@ void layout(App& self, HWND hwnd) {
             dy += hgt + after;
         };
         place(self.detail_name, S(28), S(2));
-        place(self.detail_kind, lineH, S(14));
-        place(self.detail_status_lbl, lineH, S(10));
+        place(self.detail_kind, lineH, S(10));
+        place(self.detail_status_lbl, lineH, S(6));
         place(self.detail_autostop, S(24), S(2));
-        place(self.detail_meta, lineH, S(14));
+        place(self.detail_meta, lineH, S(12));
 
-        // Buttons anchored to the bottom: 2 columns x up to 2 rows (+ open location for EXEs).
+        // Actions sit right under the status lines (always reachable), and the
+        // description fills whatever is left below them and scrolls. (Anchoring
+        // the buttons to the bottom squeezed long descriptions to a couple of
+        // unscrollable lines in short windows.)
         const bool show_open = (self.active_tab == 1) && self.detail_uid;
-        const int rows = 2;
-        int by = mainH - pad - rows * btnH - (rows - 1) * g;
-        // Never let the buttons ride up over the text when the card is short;
-        // the description simply collapses (and the buttons clip at the bottom).
-        if (by < dy) by = dy;
-        int descH = std::max(0, by - g - dy);
-        place(self.detail_desc, descH, 0);
-        if (self.detail_desc) ShowWindow(self.detail_desc, (descH >= S(24) && self.detail_uid) ? SW_SHOW : SW_HIDE);
-
         const int bw = (dw - g) / 2;
+        int by = dy;
         SetWindowPos(self.detail_stop_btn, NULL, pad, by, bw, btnH, SWP_NOZORDER);
         SetWindowPos(self.detail_start_btn, NULL, pad, by, bw, btnH, SWP_NOZORDER);
         SetWindowPos(self.detail_remove_btn, NULL, pad + bw + g, by, dw - bw - g, btnH, SWP_NOZORDER);
@@ -825,6 +859,12 @@ void layout(App& self, HWND hwnd) {
             SetWindowPos(self.detail_open_btn, NULL, pad + bw + g, by, dw - bw - g, btnH, SWP_NOZORDER);
             ShowWindow(self.detail_open_btn, show_open ? SW_SHOW : SW_HIDE);
         }
+        dy = by + btnH + S(16);
+
+        int descH = std::max(0, mainH - pad - dy);
+        place(self.detail_desc, descH, 0);
+        if (self.detail_desc) ShowWindow(self.detail_desc, (descH >= S(20) && self.detail_uid) ? SW_SHOW : SW_HIDE);
+        detail_desc_update_scrollbar(self);  // wrap width/height changed
         InvalidateRect(self.detail_panel, NULL, TRUE);
     }
 
