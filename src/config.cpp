@@ -827,11 +827,7 @@ commit_profile();
     self.prof.active = -1;
     rebuild_profile_watch_keys_locked(self);
 }
-{
-    std::lock_guard<std::shared_mutex> lk2(self.mtx);
-    self.threads.mon_wake = true;
-}
-self.threads.mon_cv.notify_one();  // wake monitor — config loaded
+monitor_wake(self);  // wake monitor — config loaded
 
     // wtxt_str (and wtxt pointer into it) freed automatically when function returns.
 

@@ -87,6 +87,7 @@ tray_sync(self, GetModuleHandleW(NULL));
               self.tray.enabled ? 1 : 0, self.tray.close_to_tray ? 1 : 0, self.theme.dark_mode ? 1 : 0);
 
     request_save_debounced(self);
+    monitor_wake(self);  // pick up the new interval/cooldown now, not after the old interval
     PostMessageW(self.hwnd, WM_APP_RESTART_UI_TIMER, 0, 0);
     return true;
 }

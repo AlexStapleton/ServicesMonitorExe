@@ -13,6 +13,7 @@ export TEMP   := $(WINTMP)
 export TMPDIR := $(WINTMP)
 
 CXX      = g++
+WINDRES ?= windres
 CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -DIDI_APPICON=101 -ffunction-sections -fdata-sections
 LDFLAGS  = -mwindows -municode -static -s -Wl,--gc-sections
 LIBS     = -lcomctl32 -ladvapi32 -lole32 -lshlwapi -lcomdlg32 -lshell32 -ldwmapi -luxtheme
@@ -57,7 +58,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp $(SRCDIR)/app.h $(SRCDIR)/util.h
 
 # Compile .rc -> .o
 $(OBJDIR)/app.res.o: $(RCFILE) app.ico app.manifest
-	windres $< -o $@
+	$(WINDRES) $< -o $@
 
 # Syntax check only (useful when linker is broken)
 syntax: $(SRCS)

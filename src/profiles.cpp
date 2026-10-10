@@ -142,11 +142,7 @@ void apply_profile_index(App& self, int idx) {
         exe_ptrs.reserve(self.items[KIND_EXE].v.size());
         for (auto& up : self.items[KIND_EXE].v) if (up) exe_ptrs.push_back(up.get());
     }
-    {
-        std::lock_guard<std::shared_mutex> lk2(self.mtx);
-        self.threads.mon_wake = true;
-    }
-    self.threads.mon_cv.notify_one();  // wake monitor — item list changed
+    monitor_wake(self);  // wake monitor — item list changed
 
     // Close anything started by the previously active profile.
     // Do this outside the lock so we don't block UI / monitor thread.

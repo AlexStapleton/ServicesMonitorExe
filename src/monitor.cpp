@@ -168,6 +168,19 @@ struct MonSnap {
     MonSnap& operator=(const MonSnap&) = delete;
 };
 
+// One outstanding NotifyServiceStatusChangeW registration per monitored service.
+// Heap-allocated (stable address) because the SCM writes into `sn` and queues an
+// APC referencing it; a slot is only freed after its handle is closed AND queued
+// APCs have been drained (see svc_handles_reset_all).
+struct MonScratch;
+struct SvcNotifySlot {
+    SERVICE_NOTIFYW sn{};
+    MonScratch* owner = nullptr;
+    bool armed = false;        // registration pending in the SCM
+    bool disabled = false;     // registration failed permanently -> poll only
+    bool needs_reopen = false; // SCM reported an error (e.g. service deleted)
+};
+
 struct MonScratch {
     std::vector<StatusStr> svc_status;
     std::vector<StatusStr> exe_status;
@@ -176,8 +189,83 @@ struct MonScratch {
     std::vector<BYTE> svc_enum_buf;
 
     std::vector<unique_sc_handle> svc_query_handles;
+    std::vector<std::unique_ptr<SvcNotifySlot>> svc_notify;
     uint32_t svc_handles_gen = 0;
+
+    // Set by the notify APC (which runs on the monitor thread itself, inside the
+    // alertable wait), consumed by monitor_wait(). No synchronization needed.
+    bool svc_notify_fired = false;
 };
+
+// APC: runs on the monitor thread during an alertable wait.
+static VOID CALLBACK svc_notify_cb(PVOID param) {
+    auto* sn = static_cast<SERVICE_NOTIFYW*>(param);
+    auto* slot = sn ? static_cast<SvcNotifySlot*>(sn->pContext) : nullptr;
+    if (!slot) return;
+    slot->armed = false;
+    if (sn->dwNotificationStatus != ERROR_SUCCESS) slot->needs_reopen = true;
+    if (slot->owner) slot->owner->svc_notify_fired = true;
+}
+
+// Run any notification APCs already queued to this thread (non-blocking).
+static void drain_queued_apcs() {
+    while (SleepEx(0, TRUE) == WAIT_IO_COMPLETION) {}
+}
+
+// Close every cached handle (which cancels pending registrations), drain APCs
+// that were queued before the close, then free the slots.
+static void svc_handles_reset_all(MonScratch& sc) {
+    sc.svc_query_handles.clear();
+    drain_queued_apcs();
+    sc.svc_notify.clear();
+}
+
+static void svc_handle_reset_one(MonScratch& sc, size_t i) {
+    sc.svc_query_handles[i].reset();
+    drain_queued_apcs();
+    if (sc.svc_notify[i]) { sc.svc_notify[i]->armed = false; sc.svc_notify[i]->needs_reopen = false; }
+}
+
+static DWORD svc_state_to_notify_bit(DWORD st) {
+    switch (st) {
+    case SERVICE_STOPPED:          return SERVICE_NOTIFY_STOPPED;
+    case SERVICE_START_PENDING:    return SERVICE_NOTIFY_START_PENDING;
+    case SERVICE_STOP_PENDING:     return SERVICE_NOTIFY_STOP_PENDING;
+    case SERVICE_RUNNING:          return SERVICE_NOTIFY_RUNNING;
+    case SERVICE_CONTINUE_PENDING: return SERVICE_NOTIFY_CONTINUE_PENDING;
+    case SERVICE_PAUSE_PENDING:    return SERVICE_NOTIFY_PAUSE_PENDING;
+    case SERVICE_PAUSED:           return SERVICE_NOTIFY_PAUSED;
+    default:                       return 0;
+    }
+}
+
+// Arm a one-shot "tell me when this service leaves its current state"
+// registration. The current state is excluded from the mask, otherwise the SCM
+// would fire immediately and we'd spin.
+static void svc_notify_arm(MonScratch& sc, size_t i, DWORD current_state) {
+    SvcNotifySlot* slot = sc.svc_notify[i].get();
+    if (!slot || slot->armed || slot->disabled || !sc.svc_query_handles[i]) return;
+
+    constexpr DWORD kAllStates = SERVICE_NOTIFY_STOPPED | SERVICE_NOTIFY_START_PENDING |
+        SERVICE_NOTIFY_STOP_PENDING | SERVICE_NOTIFY_RUNNING | SERVICE_NOTIFY_CONTINUE_PENDING |
+        SERVICE_NOTIFY_PAUSE_PENDING | SERVICE_NOTIFY_PAUSED;
+    const DWORD mask = kAllStates & ~svc_state_to_notify_bit(current_state);
+
+    slot->sn = SERVICE_NOTIFYW{};
+    slot->sn.dwVersion = SERVICE_NOTIFY_STATUS_CHANGE;
+    slot->sn.pfnNotifyCallback = svc_notify_cb;
+    slot->sn.pContext = slot;
+    slot->owner = &sc;
+
+    DWORD r = NotifyServiceStatusChangeW(sc.svc_query_handles[i].get(), mask, &slot->sn);
+    if (r == ERROR_SUCCESS) {
+        slot->armed = true;
+    } else if (r == ERROR_SERVICE_NOTIFY_CLIENT_LAGGING || r == ERROR_SERVICE_MARKED_FOR_DELETE) {
+        slot->needs_reopen = true;   // documented: close the handle and reopen
+    } else {
+        slot->disabled = true;       // e.g. not supported: fall back to polling only
+    }
+}
 
 // Definition (placed after MonScratch so the type is complete).
 static bool batch_query_service_states_direct(SC_HANDLE scm_in, MonScratch& sc,
@@ -196,14 +284,18 @@ static bool batch_query_service_states_direct(SC_HANDLE scm_in, MonScratch& sc,
 
     // Rebuild cached handles when the monitored list changes.
     if (sc.svc_handles_gen != gen_s || sc.svc_query_handles.size() != ns) {
-        sc.svc_query_handles.clear();
+        svc_handles_reset_all(sc);
         sc.svc_query_handles.resize(ns);
+        sc.svc_notify.resize(ns);
+        for (auto& p : sc.svc_notify) p = std::make_unique<SvcNotifySlot>();
         sc.svc_handles_gen = gen_s;
     }
 
     for (size_t i = 0; i < ns; i++) {
         if (i >= svc_names.size() || svc_names[i].empty()) continue;
         const wchar_t* name = svc_names[i].c_str();
+
+        if (sc.svc_notify[i]->needs_reopen) svc_handle_reset_one(sc, i);
 
         if (!sc.svc_query_handles[i]) {
             sc.svc_query_handles[i].reset(OpenServiceW(scm, name, SERVICE_QUERY_STATUS));
@@ -216,8 +308,9 @@ static bool batch_query_service_states_direct(SC_HANDLE scm_in, MonScratch& sc,
             ok = QueryServiceStatusEx(sc.svc_query_handles[i].get(), SC_STATUS_PROCESS_INFO,
                                      (LPBYTE)&ssp, sizeof(ssp), &bytes);
         }
-        if (!ok) {
-            sc.svc_query_handles[i].reset();
+        if (!ok && sc.svc_query_handles[i]) {
+            // Stale handle (e.g. service deleted/recreated): reopen once.
+            svc_handle_reset_one(sc, i);
             sc.svc_query_handles[i].reset(OpenServiceW(scm, name, SERVICE_QUERY_STATUS));
             if (sc.svc_query_handles[i]) {
                 ok = QueryServiceStatusEx(sc.svc_query_handles[i].get(), SC_STATUS_PROCESS_INFO,
@@ -227,6 +320,12 @@ static bool batch_query_service_states_direct(SC_HANDLE scm_in, MonScratch& sc,
 
         if (ok) {
             StringCchCopyW(out_status[i].buf, 32, svc_state_to_str(ssp.dwCurrentState));
+            svc_notify_arm(sc, i, ssp.dwCurrentState);
+        } else {
+            // Previously this fell through to query_service_status_fast(), which
+            // opened a brand-new SCM connection per missing service per tick and
+            // then failed the same way. Decide here with the shared connection.
+            StringCchCopyW(out_status[i].buf, 32, L"not found");
         }
     }
 
@@ -249,16 +348,36 @@ static void mons_ensure_sizes(MonSnap& snap, MonScratch& sc, size_t ns, size_t n
     sc.exe_counts.resize(ne, 0);
 }
 
-// Wait for up to total_ms, but wake immediately if stop is requested or mon_wake is set.
-// Returns true if stop was requested (caller should exit the loop).
-static bool sleep_ms_cooperative(std::stop_token st, App& self, DWORD total_ms) {
-    std::unique_lock<std::shared_mutex> lk(self.mtx);
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(total_ms);
-    self.threads.mon_cv.wait_until(lk, deadline, [&]{
-        return st.stop_requested() || self.threads.mon_wake;
-    });
-    self.threads.mon_wake = false;  // consumed
-    return st.stop_requested();
+// Wait up to total_ms. Returns early when:
+//   - stop is requested (returns true -> caller exits),
+//   - monitor_wake() signals the event (model/config changed),
+//   - a service status-change notification APC fires (enforce without waiting
+//     for the next poll). Ticks triggered by notifications are spaced at least
+//     kMinNotifyTickGapMs apart so a flapping service can't spin the thread.
+static bool monitor_wait(std::stop_token st, App& self, MonScratch& sc,
+                         DWORD total_ms, uint64_t last_tick_ms) {
+    constexpr uint64_t kMinNotifyTickGapMs = 100;
+    HANDLE ev = self.threads.mon_wake_event.get();
+    uint64_t deadline = now_mono_ms() + total_ms;
+
+    for (;;) {
+        if (st.stop_requested()) return true;
+
+        if (sc.svc_notify_fired) {
+            uint64_t earliest = last_tick_ms + kMinNotifyTickGapMs;
+            if (now_mono_ms() >= earliest) { sc.svc_notify_fired = false; return false; }
+            if (earliest < deadline) deadline = earliest;
+        }
+
+        uint64_t now = now_mono_ms();
+        if (now >= deadline) return st.stop_requested();
+        DWORD remain = (DWORD)std::min<uint64_t>(deadline - now, INFINITE - 1);
+
+        DWORD r = ev ? WaitForSingleObjectEx(ev, remain, TRUE) : SleepEx(remain, TRUE);
+        if (r == WAIT_OBJECT_0) return st.stop_requested();
+        // WAIT_IO_COMPLETION: an APC ran; loop to evaluate svc_notify_fired.
+        // WAIT_TIMEOUT / SleepEx 0: loop sees deadline reached.
+    }
 }
 
 // Shared AUTO-STOP enforcement tail for both kinds. The status-detection loops
@@ -349,8 +468,14 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
     // Reuse SCM handle across ticks (falls back to per-call open if needed).
     unique_sc_handle scm_connect(OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT));
 
+    // jthread stop -> signal the wake event so the alertable wait returns.
+    std::stop_callback on_stop(st, [&self] {
+        if (self.threads.mon_wake_event) SetEvent(self.threads.mon_wake_event.get());
+    });
+
     for (;;) {
         if (st.stop_requested()) break;
+        const uint64_t tick_start_ms = now_mono_ms();
 
 
         int monitor_interval_ms = 1000;
@@ -483,24 +608,18 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
             }
         }
 
-        // --- Services: batch query via EnumServicesStatusEx + per-item fallback ---
+        // --- Services: query cached per-service handles (+ arm change notifications) ---
         if (ns) {
             for (size_t i = 0; i < ns; i++) StringCchCopyW(sc.svc_status[i].buf, 32, L"unknown");
 
             bool ok = batch_query_service_states_direct(scm_connect.get(), sc, snap.svc_names, ns, gen_s, sc.svc_status);
-            if (!ok) post_log(self, L"Monitor: batch service enum failed");
+            if (!ok) post_log(self, L"Monitor: cannot connect to the Service Control Manager");
 
             std::vector<size_t> svc_enforce_idx;
             svc_enforce_idx.reserve(ns);
 
             for (size_t i = 0; i < ns; i++) {
                 if (snap.svc_names[i].empty()) continue;
-
-                if (_wcsicmp(sc.svc_status[i].buf, L"unknown") == 0) {
-                    wchar_t stbuf[32];
-                    if (query_service_status_fast(snap.svc_names[i].c_str(), stbuf, 32)) StringCchCopyW(sc.svc_status[i].buf, 32, stbuf);
-                    else StringCchCopyW(sc.svc_status[i].buf, 32, L"not found");
-                }
 
                 if (snap.svc_auto[i] && !should_skip_autostop_for_service_status(sc.svc_status[i].buf)) {
                     if (_wcsicmp(sc.svc_status[i].buf, L"stopped") != 0) {
@@ -519,6 +638,10 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
 
             // Option A: one message per kind per tick
             post_status_bulk(self, ItemKind::Svc, snap.svc_names, snap.svc_uids, sc.svc_status, ns, wall_now);
+        } else if (!sc.svc_query_handles.empty()) {
+            // Last service removed: cancel its notifications/handles.
+            svc_handles_reset_all(sc);
+            sc.svc_handles_gen = 0;
         }
 
         // --- EXEs: derive running/stopped from counts already populated by the unified snapshot ---
@@ -555,9 +678,11 @@ void monitor_thread_main(std::stop_token st, App* self_ptr) {
         }
 
         DWORD wait_ms = (DWORD)std::max(50, monitor_interval_ms);
-        if (sleep_ms_cooperative(st, self, wait_ms)) break;
+        if (monitor_wait(st, self, sc, wait_ms, tick_start_ms)) break;
     }
-    // MonSnap and MonScratch destructors clean up automatically via std::wstring/vector RAII.
+    // Cancel pending service notifications and drain their APCs before the
+    // slots they point into are destroyed.
+    svc_handles_reset_all(sc);
 }
 
 

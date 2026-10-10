@@ -470,8 +470,11 @@ struct ThreadState {
     std::jthread monitor_thread;
     std::vector<std::jthread> action_threads;
 
-    std::condition_variable_any mon_cv;
-    bool mon_wake = false;  // set true + notify to wake monitor immediately
+    // Auto-reset event the monitor thread waits on (alertably). Signalled by
+    // monitor_wake() and by the stop callback. Replaces the old condition
+    // variable so the wait no longer touches the model mutex and so service
+    // status-change APCs (NotifyServiceStatusChangeW) can be delivered.
+    unique_handle mon_wake_event{ CreateEventW(NULL, FALSE, FALSE, NULL) };
 
     std::mutex action_mtx;
     std::condition_variable action_cv;
@@ -721,6 +724,7 @@ void post_log(App& self, const wchar_t* text);
 void log_linef(App& self, const wchar_t* fmt, ...);
 void post_status_bulk(App& self, ItemKind kind, const std::vector<std::wstring>& names, const std::vector<uint32_t>& uids, const std::vector<StatusStr>& statuses, size_t n, time_t wall_ts);
 void request_save_debounced(App& self);
+void monitor_wake(App& self);
 void post_model_dirty(App& self);
 
 // theme

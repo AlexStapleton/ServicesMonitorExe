@@ -136,8 +136,7 @@ void enable_dpi_awareness() {
     if (p) {
         p((void*)-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
     }
-
-    FreeLibrary(user32);
+    // No FreeLibrary: the handle came from GetModuleHandleW (no reference taken).
 }
 
 HFONT create_ui_font_for_dpi(UINT dpi) {

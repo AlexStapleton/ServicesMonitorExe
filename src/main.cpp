@@ -60,19 +60,20 @@ void request_save_debounced(App& self) {
     PostMessageW(self.hwnd, WM_APP_REQUEST_SAVE, 0, 0);
 }
 
-static void wake_monitor(App& self) {
-    {
-        std::lock_guard<std::shared_mutex> lk(self.mtx);
-        self.threads.mon_wake = true;
-    }
-    self.threads.mon_cv.notify_one();
+// Wake the monitor thread for an immediate tick. Lock-free: the monitor waits
+// on an auto-reset event (alertable, so service-change APCs also wake it).
+void monitor_wake(App& self) {
+    if (self.threads.mon_wake_event) SetEvent(self.threads.mon_wake_event.get());
 }
 
 void post_model_dirty(App& self) {
     if (self.ui_dirty_posted) return;
     self.ui_dirty_posted = true;
     PostMessageW(self.hwnd, WM_APP_MODEL_DIRTY, 0, 0);
-    wake_monitor(self);
+    // NOTE: deliberately does NOT wake the monitor. This runs on every UI
+    // refresh-timer tick and every status repaint; waking the monitor here made
+    // it poll at the UI refresh rate regardless of monitor_interval_ms. Model
+    // changes that need an immediate tick call monitor_wake() explicitly.
 }
 
 // ============================================================
@@ -207,7 +208,7 @@ static void add_item(App& self, ItemKind kind) {
             it = nullptr;
         }
     }
-    wake_monitor(self);  // wake monitor to pick up new item immediately
+    monitor_wake(self);  // wake monitor to pick up new item immediately
 
     HWND lv = (kind == ItemKind::Svc) ? self.lv_svc : self.lv_exe;
     (void)lv;
@@ -240,7 +241,7 @@ static void remove_selected(App& self, ItemKind kind) {
         }
     }
     if (!removed) return;
-    wake_monitor(self);  // wake monitor to update snapshot
+    monitor_wake(self);  // wake monitor to update snapshot
 
     int idx = lv_find_item_by_name(lv, name);
     if (idx >= 0) ListView_DeleteItem(lv, idx);
@@ -304,6 +305,7 @@ bool cmd_set_autostop_uid(App& self, uint32_t uid, bool enabled, std::wstring* o
     if (changed && !name_for_log.empty()) {
         log_linef(self, L"%s: auto-stop %s", name_for_log.c_str(), enabled ? L"enabled" : L"disabled");
         post_model_dirty(self);
+        monitor_wake(self);  // enforce immediately if just enabled
         request_save_debounced(self);
     }
     return changed;
@@ -639,9 +641,9 @@ static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hw
         allow_uipi_message(hwnd, WM_APP_TRAYICON);
         if (self.tray.taskbar_restart_msg) allow_uipi_message(hwnd, self.tray.taskbar_restart_msg);
 
-        if (!enum_services_build_disp_cache(&self.disp_cache)) {
-            log_linef(self, L"Display cache: enumerate failed");
-        }
+        // The service display-name cache is built lazily by resolve_service_name()
+        // the first time a display name is typed into Add; enumerating every
+        // installed service here only delayed the first paint.
 
         restart_ui_timer(self, hwnd);
 
