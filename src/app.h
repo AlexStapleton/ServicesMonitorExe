@@ -60,6 +60,7 @@ constexpr UINT WM_APP_PROFILE_SWITCH   = WM_APP + 6;
 constexpr UINT WM_APP_STATUS_GEN       = WM_APP + 7;
 constexpr UINT WM_APP_MODEL_DIRTY      = WM_APP + 8;
 constexpr UINT WM_APP_TRAYICON         = WM_APP + 10;
+constexpr UINT WM_APP_DESC_READY       = WM_APP + 11;  // lParam: DescResult* (UI thread takes ownership)
 constexpr UINT WM_APP_INITIAL_LAYOUT   = WM_APP + 42;
 
 // --------------------------------------------------
@@ -265,6 +266,7 @@ struct Item {
     std::wstring exe_path;
 
     bool svc_desc_loaded = false;
+    bool svc_desc_loading = false;  // lookup queued on an action worker (UI thread only)
     DWORD svc_desc_last_err = 0;
     std::wstring svc_desc;
 
@@ -424,7 +426,7 @@ inline const wchar_t* dispcache_lookup(DispCache* D, const wchar_t* disp) {
 // --------------------------------------------------
 // Action queue types
 // --------------------------------------------------
-enum { ACTION_STOP = 0, ACTION_START = 1, ACTION_LAUNCH_ITEM = 2, ACTION_CLOSE_STARTED = 3 };
+enum { ACTION_STOP = 0, ACTION_START = 1, ACTION_LAUNCH_ITEM = 2, ACTION_CLOSE_STARTED = 3, ACTION_QUERY_DESC = 4 };
 
 struct Action {
     ItemKind kind = ItemKind::Svc;
@@ -435,6 +437,15 @@ struct Action {
     std::wstring target;
     DWORD pid = 0;
     unique_handle hproc;
+    uint32_t uid = 0;   // ACTION_QUERY_DESC: item the result belongs to
+};
+
+// Result of a background service-description lookup (ACTION_QUERY_DESC),
+// posted to the UI thread with WM_APP_DESC_READY.
+struct DescResult {
+    uint32_t uid = 0;
+    DWORD err = 0;
+    std::wstring text;
 };
 
 // --------------------------------------------------
@@ -519,6 +530,7 @@ constexpr int kActionWorkerCount = 4;
 
 struct ThreadState {
     std::jthread monitor_thread;
+    std::jthread proc_watch_thread;   // WMI process-start events -> monitor_wake (procwatch.cpp)
     std::vector<std::jthread> action_threads;
 
     // Auto-reset event the monitor thread waits on (alertably). Signalled by
@@ -861,6 +873,7 @@ void   close_process_best_effort(DWORD pid, HANDLE hproc_in, int wait_ms, wchar_
 // monitor thread
 void monitor_thread_main(std::stop_token st, App* self_ptr);
 void action_thread_main(std::stop_token st, App* self_ptr);
+void proc_watch_thread_main(std::stop_token st, App* self_ptr);
 
 // UI listview
 void lv_set_columns(HWND lv, const wchar_t* c0, const wchar_t* c1, const wchar_t* c2, const wchar_t* c3, const wchar_t* c4);

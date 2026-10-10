@@ -841,7 +841,7 @@ void layout(App& self, HWND hwnd) {
         place(self.detail_kind, lineH, S(10));
         place(self.detail_status_lbl, lineH, S(6));
         place(self.detail_autostop, S(24), S(2));
-        place(self.detail_meta, lineH, S(12));
+        place(self.detail_meta, 2 * lineH, S(10));  // count + last change, never ellipsized
 
         // Actions sit right under the status lines (always reachable), and the
         // description fills whatever is left below them and scrolls. (Anchoring

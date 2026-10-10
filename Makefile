@@ -16,7 +16,7 @@ CXX      = g++
 WINDRES ?= windres
 CXXFLAGS = -std=c++20 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -DIDI_APPICON=101 -ffunction-sections -fdata-sections
 LDFLAGS  = -mwindows -municode -static -s -Wl,--gc-sections
-LIBS     = -lcomctl32 -ladvapi32 -lole32 -lshlwapi -lcomdlg32 -lshell32 -ldwmapi -luxtheme
+LIBS     = -lcomctl32 -ladvapi32 -lole32 -loleaut32 -lwbemuuid -lshlwapi -lcomdlg32 -lshell32 -ldwmapi -luxtheme
 
 SRCDIR   = src
 OBJDIR   = obj
@@ -31,6 +31,7 @@ SRCS = \
 	$(SRCDIR)/config.cpp       \
 	$(SRCDIR)/profiles.cpp     \
 	$(SRCDIR)/monitor.cpp      \
+	$(SRCDIR)/procwatch.cpp    \
 	$(SRCDIR)/action.cpp       \
 	$(SRCDIR)/ui_listview.cpp  \
 	$(SRCDIR)/ui_layout.cpp    \

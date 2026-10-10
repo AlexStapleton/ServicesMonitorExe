@@ -678,6 +678,7 @@ static LRESULT on_wm_create([[maybe_unused]] App& self, [[maybe_unused]] HWND hw
         for (int i = 0; i < kActionWorkerCount; i++)
             self.threads.action_threads.emplace_back(action_thread_main, &self);
         self.threads.monitor_thread = std::jthread(monitor_thread_main, &self);
+        self.threads.proc_watch_thread = std::jthread(proc_watch_thread_main, &self);
 
         // Flush any log messages queued before the UI existed (e.g. config load errors).
         // Already timestamped by log_linef; append directly in order.
@@ -1441,6 +1442,25 @@ switch (msg) {
         return 0;
     }
 
+    case WM_APP_DESC_READY: {
+        std::unique_ptr<DescResult> r((DescResult*)lParam);
+        if (!r) return 0;
+        Item* it = nullptr;
+        {
+            ModelReadGuard lk(self);
+            it = uid_to_item_ptr_unlocked(self, r->uid);
+        }
+        if (!it) return 0;  // item removed while the lookup ran
+        // svc_desc* fields are only touched on the UI thread.
+        it->svc_desc = std::move(r->text);
+        it->svc_desc_last_err = r->err;
+        it->svc_desc_loaded = true;
+        it->svc_desc_loading = false;
+        if (self.detail_uid == it->uid && self.active_tab == KIND_SVC)
+            update_detail_panel(self, ItemKind::Svc, it);
+        return 0;
+    }
+
     case WM_APP_STATUS_GEN: {
         int kind_i = (int)wParam;
         uint32_t gen = (uint32_t)(uintptr_t)lParam;
@@ -1538,11 +1558,14 @@ switch (msg) {
         if (self.il_svc) { ImageList_Destroy(self.il_svc); self.il_svc = NULL; }
         if (self.il_exe) { ImageList_Destroy(self.il_exe); self.il_exe = NULL; }
 
+        if (self.threads.proc_watch_thread.joinable()) self.threads.proc_watch_thread.request_stop();
         if (self.threads.monitor_thread.joinable()) self.threads.monitor_thread.request_stop();
         for (auto& t : self.threads.action_threads)
             if (t.joinable()) t.request_stop();
         self.threads.action_cv.notify_all();
 
+        // The watcher reads the item lists, so it must be gone before they're freed.
+        if (self.threads.proc_watch_thread.joinable()) self.threads.proc_watch_thread.join();
         if (self.threads.monitor_thread.joinable()) self.threads.monitor_thread.join();
         for (auto& t : self.threads.action_threads)
             if (t.joinable()) t.join();
@@ -1555,6 +1578,9 @@ switch (msg) {
             while (PeekMessageW(&drain_msg, self.hwnd, WM_APP_LOG, WM_APP_LOG, PM_REMOVE)) {
                 auto* m = (std::wstring*)drain_msg.lParam;
                 delete m;
+            }
+            while (PeekMessageW(&drain_msg, self.hwnd, WM_APP_DESC_READY, WM_APP_DESC_READY, PM_REMOVE)) {
+                delete (DescResult*)drain_msg.lParam;
             }
         }
 

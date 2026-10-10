@@ -91,27 +91,33 @@ void update_detail_panel(App& self, ItemKind kind, Item* it) {
     if (self.detail_meta) {
         wchar_t when[64];
         fmt_time_short(when, 64, wall);
+        // Two short lines: in a narrow card the old single line was cut off.
         wchar_t buf[160];
         if (count > 0)
-            StringCchPrintfW(buf, 160, L"Stopped automatically %d time%s · last change %s", count, count == 1 ? L"" : L"s", when);
+            StringCchPrintfW(buf, 160, L"Stopped automatically %d time%s\r\nLast change %s", count, count == 1 ? L"" : L"s", when);
         else
-            StringCchPrintfW(buf, 160, L"Last change %s", when);
+            StringCchPrintfW(buf, 160, L"Not stopped automatically yet\r\nLast change %s", when);
         SetWindowTextW(self.detail_meta, buf);
     }
 
     // Description / Info
     if (self.detail_desc) {
         if (kind == ItemKind::Svc) {
-            // Lazy-load service description (one SCM query per item, cached)
+            // Lazy-load the service description on an action worker (it's an
+            // SCM round-trip that used to run here, on the UI thread). The
+            // result arrives as WM_APP_DESC_READY and refreshes this card.
             if (!it->svc_desc_loaded) {
-                DWORD err = 0;
-                std::wstring desc = query_service_description_best_effort(it->name, err);
-                it->svc_desc = desc;
-                it->svc_desc_last_err = err;
-                it->svc_desc_loaded = true;
-            }
-
-            if (!it->svc_desc.empty()) {
+                if (!it->svc_desc_loading) {
+                    it->svc_desc_loading = true;
+                    Action a;
+                    a.kind = ItemKind::Svc;
+                    a.op = ACTION_QUERY_DESC;
+                    a.name = it->name;
+                    a.uid = it->uid;
+                    action_enqueue(self, std::move(a));
+                }
+                detail_desc_set_text(self, L"Loading description\u2026");
+            } else if (!it->svc_desc.empty()) {
                 detail_desc_set_text(self, it->svc_desc.c_str());
             } else if (it->svc_desc_last_err == ERROR_SERVICE_DOES_NOT_EXIST) {
                 detail_desc_set_text(self, L"This service isn't installed on this PC.");
@@ -382,21 +388,24 @@ static void mons_ensure_sizes(MonSnap& snap, MonScratch& sc, size_t ns, size_t n
 
 // Wait up to total_ms. Returns early when:
 //   - stop is requested (returns true -> caller exits),
-//   - monitor_wake() signals the event (model/config changed),
-//   - a service status-change notification APC fires (enforce without waiting
-//     for the next poll). Ticks triggered by notifications are spaced at least
-//     kMinNotifyTickGapMs apart so a flapping service can't spin the thread.
+//   - monitor_wake() signals the event (model/config changed, or a monitored
+//     program just started - see procwatch.cpp),
+//   - a service status-change notification APC fires.
+// Early ticks are spaced at least kMinEarlyTickGapMs apart so a flapping
+// service or a burst of process starts (e.g. a browser spawning 20 processes)
+// collapses into one tick instead of spinning the thread.
 static bool monitor_wait(std::stop_token st, App& self, MonScratch& sc,
                          DWORD total_ms, uint64_t last_tick_ms) {
-    constexpr uint64_t kMinNotifyTickGapMs = 100;
+    constexpr uint64_t kMinEarlyTickGapMs = 100;
     HANDLE ev = self.threads.mon_wake_event.get();
     uint64_t deadline = now_mono_ms() + total_ms;
+    bool woken = false;
 
     for (;;) {
         if (st.stop_requested()) return true;
 
-        if (sc.svc_notify_fired) {
-            uint64_t earliest = last_tick_ms + kMinNotifyTickGapMs;
+        if (sc.svc_notify_fired || woken) {
+            uint64_t earliest = last_tick_ms + kMinEarlyTickGapMs;
             if (now_mono_ms() >= earliest) { sc.svc_notify_fired = false; return false; }
             if (earliest < deadline) deadline = earliest;
         }
@@ -406,7 +415,7 @@ static bool monitor_wait(std::stop_token st, App& self, MonScratch& sc,
         DWORD remain = (DWORD)std::min<uint64_t>(deadline - now, INFINITE - 1);
 
         DWORD r = ev ? WaitForSingleObjectEx(ev, remain, TRUE) : SleepEx(remain, TRUE);
-        if (r == WAIT_OBJECT_0) return st.stop_requested();
+        if (r == WAIT_OBJECT_0) woken = true;
         // WAIT_IO_COMPLETION: an APC ran; loop to evaluate svc_notify_fired.
         // WAIT_TIMEOUT / SleepEx 0: loop sees deadline reached.
     }
