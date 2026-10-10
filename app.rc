@@ -11,8 +11,8 @@ IDI_APPICON ICON "app.ico"   // optional, remove if you don't have an ico
 1 RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION 1,1,1,0
+ PRODUCTVERSION 1,1,1,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -26,8 +26,8 @@ BEGIN
       VALUE "CompanyName",      "fatkid"
       VALUE "FileDescription",  "Manage Windows Services and EXEs with Profiles"
       VALUE "OriginalFilename", "ServicesExeMonitor.exe"
-      VALUE "FileVersion",      "1.1.0"
-      VALUE "ProductVersion",   "1.1.0"
+      VALUE "FileVersion",      "1.1.1"
+      VALUE "ProductVersion",   "1.1.1"
     END
   END
   BLOCK "VarFileInfo"

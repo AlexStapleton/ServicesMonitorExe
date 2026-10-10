@@ -3,7 +3,7 @@
   <assemblyIdentity
       type="win32"
       name="ServicesExeMonitor"
-      version="1.1.0.0"/>
+      version="1.1.1.0"/>
 
   <!-- comctl32 v6 — enables themed common controls (required for modern look,
        dark mode theming, proper tab/listview/button rendering). -->
