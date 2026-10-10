@@ -123,6 +123,7 @@ make CXX=x86_64-w64-mingw32-g++-posix WINDRES=x86_64-w64-mingw32-windres
 src/
   main.cpp         Entry point, window procedure & message handlers, accelerators
   monitor.cpp      Monitor thread: status polling + Auto-Stop enforcement
+  procwatch.cpp    Process-start event watcher (wakes the monitor when a watched program starts)
   action.cpp       Action worker thread: start/stop/terminate operations
   config.cpp       Config + profile load/save (atomic, versioned)
   profiles.cpp     Profile activation / watched-exe matching
@@ -141,7 +142,7 @@ Makefile           Build
 
 ### How it works (brief)
 
-- A **monitor thread** wakes on the monitor interval, takes a single process snapshot per tick (skipped entirely when there's nothing to watch), queries service states, decides which Auto-Stop items need enforcing, and posts UI updates. It also registers for service status-change notifications (`NotifyServiceStatusChangeW`) and waits alertably, so service changes wake it immediately.
+- A **monitor thread** wakes on the monitor interval, takes a single process snapshot per tick (skipped entirely when there's nothing to watch), queries service states, decides which Auto-Stop items need enforcing, and posts UI updates. It also registers for service status-change notifications (`NotifyServiceStatusChangeW`) and waits alertably, so service changes wake it immediately. A separate watcher subscribes to process-start events (WMI `Win32_ProcessStartTrace`) and wakes it the moment a monitored or trigger program launches; if that subscription isn't available, executables are simply polled.
 - An **action thread** performs the actual start/stop/terminate work off the UI thread, so the interface stays responsive.
 - The **UI** is event-driven: only rows whose status actually changed are repainted.
 - Configuration saves are **atomic** (temp file → fsync → rename) and carry a version marker.

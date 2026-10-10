@@ -23,6 +23,16 @@ void action_thread_main(std::stop_token st, App* self_ptr) {
             if (!action_pop_wait(st, self, a)) break;
         }
 
+        // Service description lookup (one SCM round-trip; kept off the UI thread).
+        if (a.op == ACTION_QUERY_DESC) {
+            auto* r = new (std::nothrow) DescResult();
+            if (!r) continue;
+            r->uid = a.uid;
+            r->text = query_service_description_best_effort(a.name, r->err);
+            if (!PostMessageW(self.hwnd, WM_APP_DESC_READY, 0, (LPARAM)r)) delete r;
+            continue;
+        }
+
         // Profile Start Items (shell-open + best-effort close)
         if (a.op == ACTION_LAUNCH_ITEM) {
             StartedProc sp;
