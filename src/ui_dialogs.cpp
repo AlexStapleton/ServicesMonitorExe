@@ -6,6 +6,22 @@
 
 // --------------- Preferences dialog ---------------
 
+// Center a dialog over its owner, but keep it fully inside the work area of
+// the owner's monitor (the Profiles dialog is taller than the default main
+// window, so plain centering put its title bar above the top of the screen).
+static void place_dialog_in_work_area(const RECT& owner, UINT dpi, int& w, int& h, int& x, int& y) {
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    RECT wa{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+    if (GetMonitorInfoW(MonitorFromRect(&owner, MONITOR_DEFAULTTONEAREST), &mi)) wa = mi.rcWork;
+    const int margin = dpi_scale(dpi, 16);
+    w = std::min(w, std::max(200, (int)(wa.right - wa.left) - 2 * margin));
+    h = std::min(h, std::max(200, (int)(wa.bottom - wa.top) - 2 * margin));
+    x = owner.left + ((owner.right - owner.left) - w) / 2;
+    y = owner.top + ((owner.bottom - owner.top) - h) / 2;
+    x = clamp_int(x, wa.left + margin, std::max((int)wa.left + margin, (int)wa.right - margin - w));
+    y = clamp_int(y, wa.top + margin, std::max((int)wa.top + margin, (int)wa.bottom - margin - h));
+}
+
 static bool prefs_apply(App& self, HWND dlg, HWND e_ui, HWND e_mon, HWND e_cd, HWND e_sw, HWND c_tray, HWND c_close, HWND c_dark) {
     wchar_t b1[64], b2[64], b3[64], b4[64];
     GetWindowTextW(e_ui, b1, 64);
@@ -99,6 +115,8 @@ struct PrefsState {
     HWND e_ui = NULL, e_mon = NULL, e_cd = NULL, e_sw = NULL;
     HWND c_tray = NULL, c_close = NULL, c_dark = NULL;
     HWND st_cfg = NULL;
+    std::vector<HWND> headers;   // bold section titles
+    std::vector<HWND> hints;     // dim per-row hints
     UINT dpi = 96;
 };
 
@@ -124,38 +142,36 @@ static LRESULT CALLBACK PrefsWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM l
         ps->dpi = dpi;
         auto S = [&](int v96) -> int { return dpi_scale(dpi, v96); };
 
-        wchar_t ui_label[64];
-        StringCchPrintfW(ui_label, 64, L"UI Refresh (ms, %d\u2013%d):", UI_REFRESH_MS_MIN, UI_REFRESH_MS_MAX);
-        CreateWindowW(L"STATIC", ui_label, WS_CHILD | WS_VISIBLE,
-            S(12), S(14), S(160), S(20), dlg, NULL, NULL, NULL);
-        ps->e_ui = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            S(180), S(12), S(140), S(24), dlg, (HMENU)IDC_PREF_UI_MS, NULL, NULL);
+        // Grouped, plain-language layout. Values are still milliseconds (same
+        // config keys); each row gets a short dim hint instead of jargon.
+        auto header = [&](const wchar_t* text, int y) {
+            HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE, S(16), S(y), S(300), S(20), dlg, NULL, NULL, NULL);
+            ps->headers.push_back(h);
+        };
+        auto row = [&](const wchar_t* label, const wchar_t* hint, int y, int id) {
+            CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, S(16), S(y + 3), S(170), S(20), dlg, NULL, NULL, NULL);
+            HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                S(190), S(y), S(90), S(26), dlg, (HMENU)(INT_PTR)id, NULL, NULL);
+            HWND h = CreateWindowW(L"STATIC", hint, WS_CHILD | WS_VISIBLE | SS_NOPREFIX, S(290), S(y + 3), S(210), S(20), dlg, NULL, NULL, NULL);
+            ps->hints.push_back(h);
+            return e;
+        };
 
-        CreateWindowW(L"STATIC", L"Monitor Interval (ms):", WS_CHILD | WS_VISIBLE,
-            S(12), S(48), S(160), S(20), dlg, NULL, NULL, NULL);
-        ps->e_mon = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            S(180), S(46), S(140), S(24), dlg, (HMENU)IDC_PREF_MON_S, NULL, NULL);
+        header(L"Monitoring", 12);
+        ps->e_mon = row(L"Check every (ms)", L"poll interval for status", 38, IDC_PREF_MON_S);
+        ps->e_cd  = row(L"Re-stop cooldown (ms)", L"wait before stopping again", 70, IDC_PREF_CD_S);
+        ps->e_sw  = row(L"Stop/start timeout (ms)", L"max wait for a stop/start", 102, IDC_PREF_SW_S);
+        wchar_t ui_hint[64];
+        StringCchPrintfW(ui_hint, 64, L"screen refresh, %d–%d", UI_REFRESH_MS_MIN, UI_REFRESH_MS_MAX);
+        ps->e_ui  = row(L"Refresh UI every (ms)", ui_hint, 134, IDC_PREF_UI_MS);
 
-        CreateWindowW(L"STATIC", L"Autostop Cooldown (ms):", WS_CHILD | WS_VISIBLE,
-            S(12), S(82), S(160), S(20), dlg, NULL, NULL, NULL);
-        ps->e_cd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            S(180), S(80), S(140), S(24), dlg, (HMENU)IDC_PREF_CD_S, NULL, NULL);
-
-        CreateWindowW(L"STATIC", L"Stop Wait (ms):", WS_CHILD | WS_VISIBLE,
-            S(12), S(116), S(160), S(20), dlg, NULL, NULL, NULL);
-        ps->e_sw = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            S(180), S(114), S(140), S(24), dlg, (HMENU)IDC_PREF_SW_S, NULL, NULL);
-
-
-        // Tray options
-        ps->c_tray = CreateWindowW(L"BUTTON", L"Enable tray icon", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            S(12), S(152), S(200), S(22), dlg, (HMENU)IDC_PREF_TRAY_ENABLE, NULL, NULL);
-
-        ps->c_close = CreateWindowW(L"BUTTON", L"Close to tray (hide on X)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            S(12), S(176), S(240), S(22), dlg, (HMENU)IDC_PREF_CLOSE_TO_TRAY, NULL, NULL);
-
-        ps->c_dark = CreateWindowW(L"BUTTON", L"Dark mode", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            S(12), S(200), S(200), S(22), dlg, (HMENU)IDC_PREF_DARKMODE, NULL, NULL);
+        header(L"Window", 172);
+        ps->c_tray = CreateWindowW(L"BUTTON", L"Show icon in the notification area (tray)", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            S(16), S(196), S(400), S(22), dlg, (HMENU)IDC_PREF_TRAY_ENABLE, NULL, NULL);
+        ps->c_close = CreateWindowW(L"BUTTON", L"Closing the window keeps monitoring in the tray", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            S(16), S(220), S(400), S(22), dlg, (HMENU)IDC_PREF_CLOSE_TO_TRAY, NULL, NULL);
+        ps->c_dark = CreateWindowW(L"BUTTON", L"Dark mode", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            S(16), S(244), S(400), S(22), dlg, (HMENU)IDC_PREF_DARKMODE, NULL, NULL);
         wchar_t buf[64];
         StringCchPrintfW(buf, 64, L"%d", self.cfg.ui_refresh_ms);
         SetWindowTextW(ps->e_ui, buf);
@@ -177,18 +193,18 @@ static LRESULT CALLBACK PrefsWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM l
         // Path can be long; show it with path ellipsis and size it to the dialog width.
         RECT rcw{}; GetClientRect(dlg, &rcw);
         int cw = rcw.right - rcw.left;
-        int cfgX = S(12), cfgY = S(228), cfgH = S(20);
+        int cfgX = S(16), cfgY = S(280), cfgH = S(20);
         int cfgW = std::max(S(100), cw - S(24));
         ps->st_cfg = CreateWindowW(L"STATIC", cfgline,
             WS_CHILD | WS_VISIBLE | SS_PATHELLIPSIS | SS_NOPREFIX,
             cfgX, cfgY, cfgW, cfgH, dlg, NULL, NULL, NULL);
 
-CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE,
-            S(230), S(262), S(80), S(28), dlg, (HMENU)IDCANCEL, NULL, NULL);
-        CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE,
-            S(318), S(262), S(80), S(28), dlg, (HMENU)IDC_PREF_APPLY, NULL, NULL);
-        CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE,
-            S(406), S(262), S(80), S(28), dlg, (HMENU)IDOK, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            S(230), S(318), S(80), S(32), dlg, (HMENU)IDCANCEL, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            S(318), S(318), S(80), S(32), dlg, (HMENU)IDC_PREF_APPLY, NULL, NULL);
+        ui_button_style(CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            S(406), S(318), S(80), S(32), dlg, (HMENU)IDOK, NULL, NULL), 0, BTNSTYLE_ACCENT);
 
         // Compute theme resources idempotently (allocates brushes/fonts/imagelists as needed)
         theme_compute_for_window(self, dlg);
@@ -196,6 +212,8 @@ CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE,
         // Apply the correct DPI font for this dialog and then apply theme styling to its controls.
         HFONT f = theme_ensure_font_for_dpi(self, dpi);
         if (f) apply_font_recursive(dlg, f);
+        if (self.theme.font_bold)
+            for (HWND h : ps->headers) SendMessageW(h, WM_SETFONT, (WPARAM)self.theme.font_bold, FALSE);
         theme_apply_to_window(self, dlg);
 return 0;
     }
@@ -222,6 +240,12 @@ case WM_GETMINMAXINFO: {
     }
 
     case WM_CTLCOLORSTATIC:
+        if (std::find(ps->hints.begin(), ps->hints.end(), (HWND)lParam) != ps->hints.end()) {
+            HBRUSH br = theme_handle_ctlcolor(self, msg, wParam, lParam);
+            SetTextColor((HDC)wParam, self.theme.col_text_dim);
+            return (LRESULT)br;
+        }
+        [[fallthrough]];
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORBTN:
     case WM_CTLCOLORLISTBOX:
@@ -281,16 +305,16 @@ if (id == IDC_TOOLBAR_QUIT && code == BN_CLICKED) {
         auto S = [&](int v96) -> int { return dpi_scale(dpi, v96); };
         RECT rcw{}; GetClientRect(dlg, &rcw);
         int cw = rcw.right - rcw.left;
-        int m = S(12);
+        int m = S(16);
         if (ps->st_cfg) {
-            int y = S(228);
+            int y = S(280);
             int h = S(20);
             int w = std::max(S(100), cw - (m * 2));
             SetWindowPos(ps->st_cfg, NULL, m, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         }
         // Right-align Cancel / Apply / OK
-        int btnW = S(80), btnH = S(28), gap = S(8);
-        int yBtn = S(262);
+        int btnW = S(84), btnH = S(32), gap = S(8);
+        int yBtn = std::max(S(312), (int)(rcw.bottom - m - btnH));
         HWND hOK = GetDlgItem(dlg, IDOK);
         HWND hApply = GetDlgItem(dlg, IDC_PREF_APPLY);
         HWND hCancel = GetDlgItem(dlg, IDCANCEL);
@@ -345,9 +369,9 @@ void open_prefs_dialog(App& self, HWND parent) {
 
     RECT pr; GetWindowRect(parent, &pr);
     UINT dpi = get_dpi_for_hwnd(parent);
-    int w = dpi_scale(dpi, 510), h = dpi_scale(dpi, 380); // taller so bottom buttons never clip at high DPI
-    int x = pr.left + ((pr.right - pr.left) - w) / 2;
-    int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    int w = dpi_scale(dpi, 540), h = dpi_scale(dpi, 410); // taller so bottom buttons never clip at high DPI
+    int x = 0, y = 0;
+    place_dialog_in_work_area(pr, dpi, w, h, x, y);
 
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Preferences",
         WS_CAPTION | WS_POPUP | WS_SYSMENU,
@@ -549,8 +573,8 @@ void open_hotkeys_dialog(App& self, HWND parent) {
     RECT pr; GetWindowRect(parent, &pr);
     UINT dpi = get_dpi_for_hwnd(parent);
     int w = dpi_scale(dpi, 600), h = dpi_scale(dpi, 430);
-    int x = pr.left + ((pr.right - pr.left) - w) / 2;
-    int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    int x = 0, y = 0;
+    place_dialog_in_work_area(pr, dpi, w, h, x, y);
 
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Hotkeys",
         WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_THICKFRAME,
@@ -799,8 +823,8 @@ void open_diagnostics_dialog(App& self, HWND parent) {
     RECT pr; GetWindowRect(parent, &pr);
     UINT dpi = get_dpi_for_hwnd(parent);
     int w = dpi_scale(dpi, 560), h = dpi_scale(dpi, 420);
-    int x = pr.left + ((pr.right - pr.left) - w) / 2;
-    int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    int x = 0, y = 0;
+    place_dialog_in_work_area(pr, dpi, w, h, x, y);
 
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Diagnostics",
         WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_THICKFRAME,
@@ -1020,9 +1044,18 @@ static void prof_update_active_label(App& self, HWND st_active) {
         ModelReadGuard lk(self);
         name = active_profile_name_locked(self);
     }
+    size_t nprof = 0;
+    {
+        ModelReadGuard lk(self);
+        nprof = self.prof.profiles.size();
+    }
     if (name.empty()) name = L"Default";
-    wchar_t buf[300];
-    StringCchPrintfW(buf, 300, L"Currently active: %s", name.c_str());
+    wchar_t buf[400];
+    if (nprof == 0)
+        StringCchCopyW(buf, 400, L"No profiles yet. Type a name above and click Add.\r\n"
+                                 L"Until a profile's trigger program runs, the Default (main window) lists are used.");
+    else
+        StringCchPrintfW(buf, 400, L"Active now: %s", name.c_str());
     SetWindowTextW(st_active, buf);
 }
 
@@ -1099,8 +1132,8 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
     const int headerH = dpi_scale(pst->dpi, 22);
     const int bigHdrH = headerH * 2;
     const int labelH  = dpi_scale(pst->dpi, 18);
-    const int editH   = dpi_scale(pst->dpi, 24);
-    const int btnH    = dpi_scale(pst->dpi, 28);
+    const int editH   = dpi_scale(pst->dpi, 26);
+    const int btnH    = dpi_scale(pst->dpi, 30);
 
     const int btnW_sm = dpi_scale(pst->dpi, 34);
 
@@ -1282,12 +1315,12 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
     }
 
     // RIGHT PANE: pill tabs + active page layout
-    const int pillH = dpi_scale(pst->dpi, 28);
+    const int pillH = dpi_scale(pst->dpi, 34);
     const int pillGap = dpi_scale(pst->dpi, 6);
     const int pillW_act = dpi_scale(pst->dpi, 90);
-    const int pillW_start = dpi_scale(pst->dpi, 90);
-    const int pillW_svc = dpi_scale(pst->dpi, 80);
-    const int pillW_exe = dpi_scale(pst->dpi, 60);
+    const int pillW_start = dpi_scale(pst->dpi, 100);
+    const int pillW_svc = dpi_scale(pst->dpi, 90);
+    const int pillW_exe = dpi_scale(pst->dpi, 110);
 
     // Position pill buttons in a row
     int px_pill = xR;
@@ -1306,8 +1339,8 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         DWS(st_hdr, x, yy, w, headerH);
         yy += headerH + g2;
 
-        const int btn1W = dpi_scale(pst->dpi, 118);
-        const int btn2W = dpi_scale(pst->dpi, 132);
+        const int btn1W = dpi_scale(pst->dpi, 90);
+        const int btn2W = dpi_scale(pst->dpi, 100);
         const int editMin = dpi_scale(pst->dpi, 220);
         const int inlineNeed = editMin + g2 + btn1W + g2 + btn2W;
 
@@ -1363,41 +1396,32 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         int remainingH = std::max(1, ph - (yy - py));
 
         const int chkH = dpi_scale(pst->dpi, 22);
-        // Keep bottom controls fully visible; let the list shrink if space is tight.
-        const int ctrlTail = editH + g2 + chkH + g2 + btnH + g2 + btnH + g2 + btnH;
-        int listH = remainingH - (headerH + g2) - g2 - ctrlTail;
-        listH = std::max(1, listH);
+        const int addW = dpi_scale(pst->dpi, 90);
+        const int chkW = dpi_scale(pst->dpi, 100);
+        const int toggleW = dpi_scale(pst->dpi, 140);
+        // header, list, then two compact rows:
+        //   [ name edit ............ ][x Auto-stop][ + Add ]
+        //   [ Toggle auto-stop ][ Remove ]
+        const int tail = (std::max(editH, btnH) + g2) + btnH;
+        int listH = std::max(1, remainingH - (headerH + g2) - g2 - tail);
 
-        if (show_services) {
-            // --- Services content ---
-            DWS(pst->st_svc_hdr, px, yy, pw, headerH);
-            int yList = yy + headerH + g2;
-
-            DW(pst->lb_svc, px, yList, pw, listH);
-
-            int yCtrl = yList + listH + g2;
-            DW(pst->e_svc, px, yCtrl, pw, editH); yCtrl += editH + g2;
-            DW(pst->chk_svc, px, yCtrl, pw, chkH); yCtrl += chkH + g2;
-
-            // Buttons stacked (never overlap)
-            DW(pst->b_svc_add,    px, yCtrl, pw, btnH); yCtrl += btnH + g2;
-            DW(pst->b_svc_toggle, px, yCtrl, pw, btnH); yCtrl += btnH + g2;
-            DW(pst->b_svc_del,    px, yCtrl, pw, btnH);
-        } else {
-            // --- EXEs content ---
-            DWS(pst->st_exe_hdr, px, yy, pw, headerH);
-            int yList = yy + headerH + g2;
-
-            DW(pst->lb_exe, px, yList, pw, listH);
-
-            int yCtrl = yList + listH + g2;
-            DW(pst->e_exe, px, yCtrl, pw, editH); yCtrl += editH + g2;
-            DW(pst->chk_exe, px, yCtrl, pw, chkH); yCtrl += chkH + g2;
-
-            DW(pst->b_exe_add,    px, yCtrl, pw, btnH); yCtrl += btnH + g2;
-            DW(pst->b_exe_toggle, px, yCtrl, pw, btnH); yCtrl += btnH + g2;
-            DW(pst->b_exe_del,    px, yCtrl, pw, btnH);
-        }
+        auto content = [&](HWND hdr, HWND lb, HWND edit, HWND chk, HWND badd, HWND btoggle, HWND bdel) {
+            DWS(hdr, px, yy, pw, headerH);
+            int y2 = yy + headerH + g2;
+            DW(lb, px, y2, pw, listH);
+            y2 += listH + g2;
+            int editW = std::max(dpi_scale(pst->dpi, 120), pw - addW - chkW - 2 * g2);
+            DW(edit, px, y2 + (btnH - editH) / 2, editW, editH);
+            DW(chk, px + editW + g2, y2 + (btnH - chkH) / 2, chkW, chkH);
+            DW(badd, px + editW + g2 + chkW + g2, y2, addW, btnH);
+            y2 += std::max(editH, btnH) + g2;
+            DW(btoggle, px, y2, toggleW, btnH);
+            DW(bdel, px + toggleW + g2, y2, addW, btnH);
+        };
+        if (show_services)
+            content(pst->st_svc_hdr, pst->lb_svc, pst->e_svc, pst->chk_svc, pst->b_svc_add, pst->b_svc_toggle, pst->b_svc_del);
+        else
+            content(pst->st_exe_hdr, pst->lb_exe, pst->e_exe, pst->chk_exe, pst->b_exe_add, pst->b_exe_toggle, pst->b_exe_del);
     }
 
     // Finish batched layout and repaint once.
@@ -1422,7 +1446,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             ModelReadGuard lk(self);
             if (sel >= 0 && sel < (int)self.prof.profiles.size()) pname = self.prof.profiles[(size_t)sel].name;
         }
-        if (pname.empty()) pname = L"(unnamed)";
+        if (pname.empty() && sel >= 0) pname = L"(unnamed)";
         prof_set_edit_text(pst->e_name, pname);
         prof_fill_watch_list(self, pst->lb_watch, sel);
         prof_fill_content_list(self, pst->lb_svc, sel, ItemKind::Svc);
@@ -1455,7 +1479,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
             12, 34, 250, 270, dlg, (HMENU)IDC_PROF_LIST, NULL, NULL);
 
-        pst->st_name_hdr = CreateWindowW(L"STATIC", L"Profile name:", WS_CHILD | WS_VISIBLE,
+        pst->st_name_hdr = CreateWindowW(L"STATIC", L"Name", WS_CHILD | WS_VISIBLE,
             12, 310, 100, 18, dlg, NULL, NULL, NULL);
 
         pst->e_name = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -1469,51 +1493,51 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         pst->b_del = CreateWindowW(L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE,
             154, 362, 70, 26, dlg, (HMENU)IDC_PROF_DELETE, NULL, NULL);
 
-        pst->b_up = CreateWindowW(L"BUTTON", L"Up", WS_CHILD | WS_VISIBLE,
+        pst->b_up = CreateWindowW(L"BUTTON", L"\u25B2", WS_CHILD | WS_VISIBLE,
             230, 362, 32, 26, dlg, (HMENU)IDC_PROF_MOVE_UP, NULL, NULL);
-        pst->b_down = CreateWindowW(L"BUTTON", L"Down", WS_CHILD | WS_VISIBLE,
+        pst->b_down = CreateWindowW(L"BUTTON", L"\u25BC", WS_CHILD | WS_VISIBLE,
             230, 392, 32, 26, dlg, (HMENU)IDC_PROF_MOVE_DOWN, NULL, NULL);
 
 
         // Pill-style tab buttons (consistent with main window)
-        pst->pill_activation = CreateWindowExW(0, L"BUTTON", L"Activation",
+        pst->pill_activation = CreateWindowExW(0, L"BUTTON", L"Triggers",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 0, 0, dlg, (HMENU)(INT_PTR)IDC_PROF_TAB_ACTIVATION, NULL, NULL);
-        pst->pill_start = CreateWindowExW(0, L"BUTTON", L"Start Items",
+        pst->pill_start = CreateWindowExW(0, L"BUTTON", L"Start items",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 0, 0, dlg, (HMENU)(INT_PTR)IDC_PROF_TAB_START, NULL, NULL);
         pst->pill_svc = CreateWindowExW(0, L"BUTTON", L"Services",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 0, 0, dlg, (HMENU)(INT_PTR)IDC_PROF_TAB_SVC, NULL, NULL);
-        pst->pill_exe = CreateWindowExW(0, L"BUTTON", L"EXEs",
+        pst->pill_exe = CreateWindowExW(0, L"BUTTON", L"Executables",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             0, 0, 0, 0, dlg, (HMENU)(INT_PTR)IDC_PROF_TAB_EXE, NULL, NULL);
         pst->prof_tab = 0;
 
-        pst->st_watch_hdr = CreateWindowW(L"STATIC", L"Activation (WATCH EXEs)\r\nProfile activates if ANY are running", WS_CHILD | WS_VISIBLE,
+        pst->st_watch_hdr = CreateWindowW(L"STATIC", L"Turn this profile on while any of these programs is running.\r\nIf several profiles match, the first one in the list wins.", WS_CHILD | WS_VISIBLE,
             280, 10, 460, 20, dlg, NULL, NULL, NULL);
 
         pst->lb_watch = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
             280, 34, 460, 230, dlg, (HMENU)IDC_WATCH_LIST, NULL, NULL);
 
-        pst->st_watch_add_hdr = CreateWindowW(L"STATIC", L"Add WATCH exe (name or full path):", WS_CHILD | WS_VISIBLE,
+        pst->st_watch_add_hdr = CreateWindowW(L"STATIC", L"Program name or full path", WS_CHILD | WS_VISIBLE,
             280, 270, 300, 18, dlg, NULL, NULL, NULL);
 
         pst->e_watch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             280, 290, 340, 24, dlg, (HMENU)IDC_WATCH_EDIT, NULL, NULL);
 
-        pst->b_watch_add = CreateWindowW(L"BUTTON", L"Add WATCH", WS_CHILD | WS_VISIBLE,
+        pst->b_watch_add = CreateWindowW(L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE,
             628, 290, 112, 24, dlg, (HMENU)IDC_WATCH_ADD, NULL, NULL);
 
-        pst->b_watch_del = CreateWindowW(L"BUTTON", L"Remove selected", WS_CHILD | WS_VISIBLE,
+        pst->b_watch_del = CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE,
             628, 320, 112, 24, dlg, (HMENU)IDC_WATCH_REMOVE, NULL, NULL);
 
         // ---- Profile contents editor (services / exes) ----
 
         // Services
-        pst->st_svc_hdr = CreateWindowW(L"STATIC", L"Services in this profile:", WS_CHILD | WS_VISIBLE,
+        pst->st_svc_hdr = CreateWindowW(L"STATIC", L"Services used while this profile is active", WS_CHILD | WS_VISIBLE,
             280, 374, 220, 18, dlg, NULL, NULL, NULL);
 
         pst->lb_svc = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -1528,17 +1552,17 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         pst->chk_svc = CreateWindowW(L"BUTTON", L"Auto-stop", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             280, 620, 220, 22, dlg, (HMENU)IDC_PCONT_SVC_AUTOSTOP, NULL, NULL);
 
-        pst->b_svc_add = CreateWindowW(L"BUTTON", L"Add service", WS_CHILD | WS_VISIBLE,
+        pst->b_svc_add = CreateWindowW(L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE,
             280, 646, 220, 24, dlg, (HMENU)IDC_PCONT_SVC_ADD, NULL, NULL);
 
         pst->b_svc_toggle = CreateWindowW(L"BUTTON", L"Toggle auto-stop", WS_CHILD | WS_VISIBLE,
             280, 674, 220, 24, dlg, (HMENU)IDC_PCONT_SVC_TOGGLE, NULL, NULL);
 
-        pst->b_svc_del = CreateWindowW(L"BUTTON", L"Remove selected service", WS_CHILD | WS_VISIBLE,
+        pst->b_svc_del = CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE,
             280, 702, 220, 24, dlg, (HMENU)IDC_PCONT_SVC_REMOVE, NULL, NULL);
 
         // EXEs
-        pst->st_exe_hdr = CreateWindowW(L"STATIC", L"EXEs in this profile:", WS_CHILD | WS_VISIBLE,
+        pst->st_exe_hdr = CreateWindowW(L"STATIC", L"Executables used while this profile is active", WS_CHILD | WS_VISIBLE,
             520, 374, 220, 18, dlg, NULL, NULL, NULL);
 
         pst->lb_exe = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -1553,21 +1577,21 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         pst->chk_exe = CreateWindowW(L"BUTTON", L"Auto-stop", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             520, 620, 220, 22, dlg, (HMENU)IDC_PCONT_EXE_AUTOSTOP, NULL, NULL);
 
-        pst->b_exe_add = CreateWindowW(L"BUTTON", L"Add exe", WS_CHILD | WS_VISIBLE,
+        pst->b_exe_add = CreateWindowW(L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE,
             520, 646, 220, 24, dlg, (HMENU)IDC_PCONT_EXE_ADD, NULL, NULL);
 
         pst->b_exe_toggle = CreateWindowW(L"BUTTON", L"Toggle auto-stop", WS_CHILD | WS_VISIBLE,
             520, 674, 220, 24, dlg, (HMENU)IDC_PCONT_EXE_TOGGLE, NULL, NULL);
 
-        pst->b_exe_del = CreateWindowW(L"BUTTON", L"Remove selected exe", WS_CHILD | WS_VISIBLE,
+        pst->b_exe_del = CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE,
             520, 702, 220, 24, dlg, (HMENU)IDC_PCONT_EXE_REMOVE, NULL, NULL);
 
         pst->st_active = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
             280, 734, 460, 18, dlg, (HMENU)IDC_PROF_ACTIVE_LABEL, NULL, NULL);
 
         pst->st_note = CreateWindowW(L"STATIC",
-            L"Note: If multiple profiles match, the first one in this list wins.\r\n"
-            L"Profiles deactivate automatically when none of their WATCH EXEs are running.",
+            L"While this profile is active, these lists replace the main window's lists.\r\n"
+            L"Ticked items are kept stopped (auto-stop).",
             WS_CHILD | WS_VISIBLE,
             280, 756, 460, 40, dlg, NULL, NULL, NULL);
 
@@ -1575,7 +1599,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         // Start Items on activation (separate from Auto-stop lists)
 
         pst->st_start_hdr = CreateWindowW(L"STATIC",
-            L"Start items when this profile activates\r\n(best-effort closed on deactivation):",
+            L"Open these when the profile turns on.\r\nPrograms it started are closed again when it turns off.",
             WS_CHILD | WS_VISIBLE,
             280, 804, 460, 18, dlg, NULL, NULL, NULL);
 
@@ -1583,7 +1607,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
             280, 826, 460, 110, dlg, (HMENU)IDC_PSTART_EXE_LIST, NULL, NULL);
 
-        pst->st_start_add_hdr = CreateWindowW(L"STATIC", L"Add start item (file/path/URL):", WS_CHILD | WS_VISIBLE,
+        pst->st_start_add_hdr = CreateWindowW(L"STATIC", L"File, program, folder or URL", WS_CHILD | WS_VISIBLE,
             280, 944, 300, 18, dlg, NULL, NULL, NULL);
 
         pst->e_start_exe = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -1593,7 +1617,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         pst->b_start_exe_add = CreateWindowW(L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE,
             630, 960, 110, 26, dlg, (HMENU)IDC_PSTART_EXE_ADD, NULL, NULL);
 
-        pst->b_start_exe_del = CreateWindowW(L"BUTTON", L"Remove selected", WS_CHILD | WS_VISIBLE,
+        pst->b_start_exe_del = CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE,
             630, 988, 110, 26, dlg, (HMENU)IDC_PSTART_EXE_REMOVE, NULL, NULL);
         pst->b_close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE,
      660, 1040, 80, 28, dlg, (HMENU)IDCANCEL, NULL, NULL);
@@ -1609,6 +1633,25 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             // Pill buttons get font via apply_font_recursive
         }
 
+        if (self.theme.font_bold) {
+            for (HWND h : { pst->st_profiles_hdr, pst->st_watch_hdr, pst->st_start_hdr, pst->st_svc_hdr, pst->st_exe_hdr })
+                if (h) SendMessageW(h, WM_SETFONT, (WPARAM)self.theme.font_bold, FALSE);
+        }
+        set_cue_banner(pst->e_name, L"New profile name");
+        set_cue_banner(pst->e_watch, L"e.g. game.exe");
+        set_cue_banner(pst->e_svc, L"Service name");
+        set_cue_banner(pst->e_exe, L"Program name or path");
+        set_cue_banner(pst->e_start_exe, L"e.g. C:\\Tools\\app.exe or https://\u2026");
+        ui_button_style(pst->b_add, GLYPH_ADD, BTNSTYLE_ACCENT);
+        ui_button_style(pst->b_rename, GLYPH_RENAME, 0);
+        ui_button_style(pst->b_del, GLYPH_DELETE, 0);
+        ui_button_style(pst->b_up, GLYPH_UP, BTNSTYLE_ICON_ONLY);
+        ui_button_style(pst->b_down, GLYPH_DOWN, BTNSTYLE_ICON_ONLY);
+        for (HWND h : { pst->b_watch_add, pst->b_svc_add, pst->b_exe_add, pst->b_start_exe_add })
+            ui_button_style(h, GLYPH_ADD, 0);
+        for (HWND h : { pst->b_watch_del, pst->b_svc_del, pst->b_exe_del, pst->b_start_exe_del })
+            ui_button_style(h, GLYPH_DELETE, 0);
+
         prof_fill_profile_list(self, pst->lb_profiles, 0);
         refresh_for_selection();
 
@@ -1620,8 +1663,8 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
     case WM_GETMINMAXINFO: {
         auto* p = reinterpret_cast<MINMAXINFO*>(lParam);
         if (p) {
-            const int minW = dpi_scale(pst->dpi, 900);
-            const int minH = dpi_scale(pst->dpi, 620);
+            const int minW = dpi_scale(pst->dpi, 780);
+            const int minH = dpi_scale(pst->dpi, 560);
             p->ptMinTrackSize.x = minW;
             p->ptMinTrackSize.y = minH;
         }
@@ -1669,8 +1712,8 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
 
             // Background
             COLORREF bgCol = selected
-                ? (self.theme.dark_mode ? DK_BORDER : GetSysColor(COLOR_HIGHLIGHT))
-                : (self.theme.dark_mode ? self.theme.col_edit_bg : GetSysColor(COLOR_WINDOW));
+                ? (self.theme.dark_mode ? RGB(65, 65, 65) : RGB(229, 241, 251))
+                : self.theme.col_edit_bg;
             HBRUSH bgBr = CreateSolidBrush(bgCol);
             FillRect(hdc, &rc, bgBr);
             DeleteObject(bgBr);
@@ -1682,13 +1725,13 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             RECT chkRc = { chkX, chkY, chkX + chkSize, chkY + chkSize };
 
             // Checkbox border
-            COLORREF borderCol = self.theme.dark_mode ? DK_BORDER : RGB(160, 160, 160);
+            COLORREF borderCol = self.theme.dark_mode ? RGB(120, 120, 120) : RGB(130, 130, 130);
             HPEN chkPen = CreatePen(PS_SOLID, 1, borderCol);
             HGDIOBJ oldPen = SelectObject(hdc, chkPen);
             HGDIOBJ oldBr2 = SelectObject(hdc, GetStockObject(NULL_BRUSH));
             if (checked) {
                 // Filled checkbox with accent color
-                COLORREF accentCol = self.theme.dark_mode ? DK_ACCENT : LT_ACCENT;
+                COLORREF accentCol = self.theme.col_accent;
                 HBRUSH accentBr = CreateSolidBrush(accentCol);
                 SelectObject(hdc, accentBr);
                 int r2 = dpi_scale(pst->dpi, 3);
@@ -1697,7 +1740,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
                 DeleteObject(accentBr);
 
                 // Checkmark
-                SetTextColor(hdc, RGB(255, 255, 255));
+                SetTextColor(hdc, self.theme.col_on_accent);
                 SetBkMode(hdc, TRANSPARENT);
                 DrawTextW(hdc, L"\u2713", 1, &chkRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             } else {
@@ -1716,9 +1759,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
             RECT textRc = rc;
             textRc.left = chkRc.right + dpi_scale(pst->dpi, 6);
             SetBkMode(hdc, TRANSPARENT);
-            COLORREF txtCol = selected
-                ? (self.theme.dark_mode ? self.theme.col_text : GetSysColor(COLOR_HIGHLIGHTTEXT))
-                : (self.theme.dark_mode ? self.theme.col_text : GetSysColor(COLOR_WINDOWTEXT));
+            COLORREF txtCol = self.theme.col_text;
             SetTextColor(hdc, txtCol);
 
             HFONT hfont = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
@@ -1778,6 +1819,27 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
         }
 
         if (id == IDC_PROF_ADD) {
+            // Use the typed name (previously ignored: Add always created
+            // "Profile" and you had to Rename). The edit also shows the selected
+            // profile's name, so only treat it as a new name if it differs.
+            std::wstring typed = prof_get_edit_text(pst->e_name);
+            if (typed.size() > 64) typed.resize(64);
+            for (wchar_t ch : typed) {
+                // Same rule as Rename ('|' would also break the config format).
+                if (ch < 32 || wcschr(L"<>:\"/\\|?*", ch)) {
+                    msgbox_warn(dlg, L"Profiles",
+                        L"Profile name contains an invalid character.\n\n"
+                        L"Avoid: < > : \" / \\ | ? * and control characters.");
+                    return 0;
+                }
+            }
+            {
+                int cur = prof_get_sel(pst->lb_profiles);
+                ModelReadGuard lk(self);
+                if (cur >= 0 && cur < (int)self.prof.profiles.size() &&
+                    _wcsicmp(self.prof.profiles[(size_t)cur].name.c_str(), typed.c_str()) == 0) typed.clear();
+                if (typed == L"(unnamed)") typed.clear();
+            }
             int new_sel = -1;
             {
                 ModelLockGuard lk(self);
@@ -1789,7 +1851,7 @@ static LRESULT CALLBACK ProfilesWndProc(HWND dlg, UINT msg, WPARAM wParam, LPARA
                 }
 
                 ProfileSnapshot p;
-                p.name = make_unique_profile_name_locked(self, L"Profile");
+                p.name = make_unique_profile_name_locked(self, typed.empty() ? L"Profile" : typed.c_str());
                 p.cfg = self.prof.default_cfg; // start from default
                 self.prof.profiles.push_back(std::move(p));
                 rebuild_profile_watch_keys_locked(self);
@@ -2491,7 +2553,7 @@ void open_profiles_dialog(App& self, HWND parent) {
 
     RECT pr; GetWindowRect(parent, &pr);
     UINT dpi = get_dpi_for_hwnd(parent);
-    int w = dpi_scale(dpi, 980), h = dpi_scale(dpi, 720);
+    int w = dpi_scale(dpi, 900), h = dpi_scale(dpi, 640);
     // Clamp to work area so the dialog never starts off-screen
     RECT wa{};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
@@ -2502,11 +2564,11 @@ void open_profiles_dialog(App& self, HWND parent) {
         w = std::min(w, maxW);
         h = std::min(h, maxH);
     }
-    int x = pr.left + ((pr.right - pr.left) - w) / 2;
-    int y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    int x = 0, y = 0;
+    place_dialog_in_work_area(pr, dpi, w, h, x, y);
 
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Profiles",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN | WS_VSCROLL,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
         x, y, w, h, parent, NULL, wc.hInstance, &self);
 
     ShowWindow(dlg, SW_SHOW);

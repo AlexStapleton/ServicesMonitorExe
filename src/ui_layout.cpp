@@ -470,10 +470,10 @@ void update_statusbar(App& self) {
 
     wchar_t text[256];
     if (actions_q)
-        StringCchPrintfW(text, 256, L"%s  ·  Profile: %s  ·  %zu action%s pending  ·  Last change %s",
+        StringCchPrintfW(text, 256, L"%s  ·  Profile: %s  ·  %zu action%s pending  ·  Last checked %s",
                          mon ? L"Monitoring" : L"Monitor stopped", prof.c_str(), actions_q, actions_q == 1 ? L"" : L"s", ts);
     else
-        StringCchPrintfW(text, 256, L"%s  ·  Profile: %s  ·  Last change %s",
+        StringCchPrintfW(text, 256, L"%s  ·  Profile: %s  ·  Last checked %s",
                          mon ? L"Monitoring" : L"Monitor stopped", prof.c_str(), ts);
 
     // Owner-draw: cache the text and flag part 0 so WM_DRAWITEM renders it

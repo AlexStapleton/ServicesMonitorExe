@@ -356,10 +356,15 @@ void theme_paint_button(App& self, HWND btn, HDC hdc) {
         else if (hot) fill = RGB(GetRValue(fill) * 92 / 100, GetGValue(fill) * 92 / 100, GetBValue(fill) * 92 / 100);
         border = fill;
         text = t.col_on_accent;
+    } else if (disabled) {
+        // Clearly inert: blend into the background, faded text.
+        fill = t.col_bg;
+        border = t.col_border;
+        text = t.dark_mode ? RGB(110, 110, 110) : RGB(165, 165, 165);
     } else {
         fill = pressed ? t.col_ctrl_pressed : hot ? t.col_ctrl_hot : t.col_ctrl;
         border = t.col_border;
-        text = disabled ? t.col_text_dim : t.col_text;
+        text = t.col_text;
     }
 
     if (!subtle || hot || pressed) {
