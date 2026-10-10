@@ -112,18 +112,18 @@ void update_detail_panel(App& self, ItemKind kind, Item* it) {
             }
 
             if (!it->svc_desc.empty()) {
-                SetWindowTextW(self.detail_desc, it->svc_desc.c_str());
+                detail_desc_set_text(self, it->svc_desc.c_str());
             } else if (it->svc_desc_last_err == ERROR_SERVICE_DOES_NOT_EXIST) {
-                SetWindowTextW(self.detail_desc, L"This service isn't installed on this PC.");
+                detail_desc_set_text(self, L"This service isn't installed on this PC.");
             } else if (it->svc_desc_last_err) {
                 wchar_t buf[256];
                 StringCchPrintfW(buf, 256, L"No description available (error %lu).", (unsigned long)it->svc_desc_last_err);
-                SetWindowTextW(self.detail_desc, buf);
+                detail_desc_set_text(self, buf);
             } else {
-                SetWindowTextW(self.detail_desc, L"No description.");
+                detail_desc_set_text(self, L"No description.");
             }
         } else {
-            SetWindowTextW(self.detail_desc, it->exe_path.empty()
+            detail_desc_set_text(self, it->exe_path.empty()
                 ? L"Matched by process name. Add it with a full path (or use Browse…) to enable Start and Open location."
                 : L"");
         }
